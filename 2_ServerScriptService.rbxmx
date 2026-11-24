@@ -1,0 +1,3193 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="Folder" referent="RBX18">
+    <Properties>
+      <string name="Name">Server</string>
+    </Properties>
+    <Item class="ModuleScript" referent="RBX19">
+      <Properties>
+        <string name="Name">AnnounceService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	AnnounceService.lua
+	Ubicación en Roblox: ServerScriptService > Server > AnnounceService   (ModuleScript)
+
+	Cuando entra un jugador que pertenece al Top 100 (o al Top 3) de cualquier
+	categoría, se manda un mensaje de sistema llamativo al chat.
+
+	El servidor NO puede llamar a TextChannel:DisplaySystemMessage (es un método
+	de cliente), así que se envía por el RemoteEvent "SystemChat" y cada cliente
+	lo pinta en su canal con RichText (ChatController.lua).
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Format = require(Shared.Format)
+local Net = require(Shared.Net)
+local Palette = require(Shared.Palette)
+local Titles = require(Shared.Titles)
+
+local LeaderboardService = require(script.Parent.LeaderboardService)
+
+local AnnounceService = {}
+
+local announced: { [number]: boolean } = {}
+
+local COLORS = {
+	Legend   = Color3.fromRGB(255, 205, 55),
+	Top100   = Color3.fromRGB(0, 230, 190),
+	Name     = Color3.fromRGB(255, 255, 255),
+	Detail   = Color3.fromRGB(175, 190, 220),
+	Bracket  = Color3.fromRGB(255, 120, 220),
+}
+
+local function categoryLabel(catId: string): string
+	return Titles.CategoryNames[catId] or catId
+end
+
+--- Construye el mensaje RichText.
+local function buildMessage(player: Player, rank: number, catId: string): string
+	local isLegend = rank <= 3
+	local tag = isLegend and "[LEYENDA]" or "[AVISO TOP]"
+	local tagColor = isLegend and COLORS.Legend or COLORS.Top100
+	local medal = (rank == 1 and "🥇") or (rank == 2 and "🥈") or (rank == 3 and "🥉") or "◈"
+
+	local safeDisplay = Format.escapeRich(player.DisplayName)
+	local safeName = Format.escapeRich(player.Name)
+
+	return table.concat({
+		Format.colored(tag, tagColor, true),
+		" ",
+		medal,
+		" ",
+		Format.colored(safeDisplay, COLORS.Name, true),
+		Format.colored(" (@" .. safeName .. ") ", COLORS.Detail),
+		Format.colored("acaba de entrar · ", COLORS.Detail),
+		Format.colored(("#%d"):format(rank), tagColor, true),
+		Format.colored(" en ", COLORS.Detail),
+		Format.colored(categoryLabel(catId), COLORS.Bracket, true),
+	})
+end
+
+local function announcePlayer(player: Player)
+	if announced[player.UserId] then return end
+
+	local rank, catId = LeaderboardService.GetBestRank(player.UserId)
+	if not rank or not catId then return end
+	if rank > Config.Leaderboards.TopCount then return end
+
+	announced[player.UserId] = true
+
+	local message = buildMessage(player, rank, catId)
+	Net.Event("SystemChat"):FireAllClients({ Text = message })
+
+	-- Banner en pantalla para que no pase desapercibido
+	Net.Event("Announce"):FireAllClients({
+		Text = (rank <= 3 and "¡LLEGÓ UNA LEYENDA!" or "¡JUGADOR DEL TOP 100!"),
+		Subtitle = ("%s · #%d en %s"):format(player.DisplayName, rank, categoryLabel(catId)),
+		Color = rank <= 3 and COLORS.Legend or COLORS.Top100,
+	})
+end
+
+function AnnounceService.Init()
+	local function hook(player: Player)
+		task.spawn(function()
+			-- Espera a que el caché de leaderboards tenga datos (máx. 45 s)
+			local t0 = os.clock()
+			while os.clock() - t0 < 45 do
+				if next(LeaderboardService.GetRanks(player.UserId)) ~= nil then break end
+				task.wait(2)
+			end
+			if player.Parent then
+				announcePlayer(player)
+			end
+		end)
+	end
+
+	Players.PlayerAdded:Connect(hook)
+	for _, p in ipairs(Players:GetPlayers()) do hook(p) end
+
+	Players.PlayerRemoving:Connect(function(player)
+		announced[player.UserId] = nil
+	end)
+
+	-- Mensaje de bienvenida general
+	Players.PlayerAdded:Connect(function(player)
+		task.delay(3, function()
+			if not player.Parent then return end
+			Net.Event("SystemChat"):FireAllClients({
+				Text = Format.colored("[" .. Config.GameName .. "]", Palette.Cyan, true)
+					.. " " .. Format.colored(Format.escapeRich(player.DisplayName), COLORS.Name, true)
+					.. Format.colored(" se unió al servidor", COLORS.Detail),
+			})
+		end)
+	end)
+
+	print("[AnnounceService] listo")
+end
+
+return AnnounceService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX20">
+      <Properties>
+        <string name="Name">BoardBuilder</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	BoardBuilder.lua
+	Ubicación en Roblox: ServerScriptService > Server > BoardBuilder   (ModuleScript)
+
+	Los 3 tableros físicos gigantes del lobby (Top 100 Kills / Racha / Horas).
+
+	Cada tablero:
+	  · Estructura Stud con marco neón, base y focos propios
+	  · SurfaceGui (MaxDistance limitado para no gastar FPS de lejos)
+	  · ScrollingFrame con barra visible y estilizada, 100 filas reutilizadas
+	  · Fila: puesto (#1 oro / #2 plata / #3 bronce con insignia), avatar real
+	    (Players:GetUserThumbnailAsync + fallback rbxthumb), DisplayName,
+	    @Username y valor formateado
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Palette = require(Shared.Palette)
+local Build = require(Shared.Build)
+local Format = require(Shared.Format)
+
+local LeaderboardService = require(script.Parent.LeaderboardService)
+local LobbyBuilder = require(script.Parent.LobbyBuilder)
+
+local BoardBuilder = {}
+
+local ROWS = Config.Leaderboards.TopCount
+local ROW_H = 52
+local ROW_PAD = 4
+local PPS = 14                 -- píxeles por stud
+local SCREEN_W, SCREEN_H = 72, 48
+
+local boards: { [string]: { Rows: { Frame }, Gui: SurfaceGui, Status: TextLabel } } = {}
+local thumbCache: { [number]: string } = {}
+
+local MEDALS = { "①", "②", "③" }
+
+-- ─────────────────────── AVATARES ───────────────────────────────────────────
+local function thumbFallback(userId: number): string
+	return ("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150"):format(userId)
+end
+
+--- Resuelve la miniatura real. Se usa GetUserThumbnailAsync (como pide el brief)
+--- con caché y en segundo plano; mientras tanto se muestra rbxthumb.
+local function resolveThumb(userId: number, apply: (string) -> ())
+	if thumbCache[userId] then
+		apply(thumbCache[userId])
+		return
+	end
+	apply(thumbFallback(userId))
+	task.spawn(function()
+		local ok, content = pcall(function()
+			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+		end)
+		if ok and content then
+			thumbCache[userId] = content
+			apply(content)
+		end
+	end)
+end
+
+-- ─────────────────────── UI ─────────────────────────────────────────────────
+local function makeRow(parent: Instance, index: number, accent: Color3): Frame
+	local row = Instance.new("Frame")
+	row.Name = ("Row%03d"):format(index)
+	row.Size = UDim2.new(1, -16, 0, ROW_H)
+	row.BackgroundColor3 = (index % 2 == 0) and Color3.fromRGB(26, 30, 48) or Color3.fromRGB(33, 38, 60)
+	row.BackgroundTransparency = 0.08
+	row.BorderSizePixel = 0
+	row.LayoutOrder = index
+	row.Parent = parent
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = row
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "Edge"
+	stroke.Thickness = 1.5
+	stroke.Color = Color3.fromRGB(60, 70, 100)
+	stroke.Transparency = 0.4
+	stroke.Parent = row
+
+	local grad = Instance.new("UIGradient")
+	grad.Name = "Grad"
+	grad.Enabled = false
+	grad.Rotation = 0
+	grad.Parent = row
+
+	local rank = Instance.new("TextLabel")
+	rank.Name = "Rank"
+	rank.Size = UDim2.new(0, 86, 1, 0)
+	rank.BackgroundTransparency = 1
+	rank.Font = Enum.Font.FredokaOne
+	rank.TextColor3 = Palette.White
+	rank.TextSize = 28
+	rank.Text = "#" .. index
+	rank.Parent = row
+
+	local rankStroke = Instance.new("UIStroke")
+	rankStroke.Thickness = 2
+	rankStroke.Color = Color3.fromRGB(10, 12, 22)
+	rankStroke.Parent = rank
+
+	local avatarHolder = Instance.new("Frame")
+	avatarHolder.Name = "AvatarHolder"
+	avatarHolder.Size = UDim2.new(0, ROW_H - 10, 0, ROW_H - 10)
+	avatarHolder.Position = UDim2.new(0, 90, 0.5, -(ROW_H - 10) / 2)
+	avatarHolder.BackgroundColor3 = Color3.fromRGB(18, 20, 34)
+	avatarHolder.BorderSizePixel = 0
+	avatarHolder.Parent = row
+
+	local avCorner = Instance.new("UICorner")
+	avCorner.CornerRadius = UDim.new(1, 0)
+	avCorner.Parent = avatarHolder
+
+	local avStroke = Instance.new("UIStroke")
+	avStroke.Name = "AvatarStroke"
+	avStroke.Thickness = 2
+	avStroke.Color = accent
+	avStroke.Parent = avatarHolder
+
+	local avatar = Instance.new("ImageLabel")
+	avatar.Name = "Avatar"
+	avatar.Size = UDim2.fromScale(1, 1)
+	avatar.BackgroundTransparency = 1
+	avatar.Image = ""
+	avatar.Parent = avatarHolder
+
+	local avatarCorner = Instance.new("UICorner")
+	avatarCorner.CornerRadius = UDim.new(1, 0)
+	avatarCorner.Parent = avatar
+
+	local display = Instance.new("TextLabel")
+	display.Name = "DisplayName"
+	display.Size = UDim2.new(1, -400, 0, 26)
+	display.Position = UDim2.new(0, 150, 0, 4)
+	display.BackgroundTransparency = 1
+	display.Font = Enum.Font.GothamBold
+	display.TextXAlignment = Enum.TextXAlignment.Left
+	display.TextColor3 = Palette.White
+	display.TextSize = 22
+	display.TextTruncate = Enum.TextTruncate.AtEnd
+	display.Text = "—"
+	display.Parent = row
+
+	local username = Instance.new("TextLabel")
+	username.Name = "Username"
+	username.Size = UDim2.new(1, -400, 0, 20)
+	username.Position = UDim2.new(0, 150, 0, 28)
+	username.BackgroundTransparency = 1
+	username.Font = Enum.Font.Gotham
+	username.TextXAlignment = Enum.TextXAlignment.Left
+	username.TextColor3 = Color3.fromRGB(150, 165, 200)
+	username.TextSize = 17
+	username.TextTruncate = Enum.TextTruncate.AtEnd
+	username.Text = ""
+	username.Parent = row
+
+	local value = Instance.new("TextLabel")
+	value.Name = "Value"
+	value.Size = UDim2.new(0, 230, 1, 0)
+	value.Position = UDim2.new(1, -236, 0, 0)
+	value.BackgroundTransparency = 1
+	value.Font = Enum.Font.FredokaOne
+	value.TextXAlignment = Enum.TextXAlignment.Right
+	value.TextColor3 = accent
+	value.TextSize = 26
+	value.Text = "—"
+	value.Parent = row
+
+	local valueStroke = Instance.new("UIStroke")
+	valueStroke.Thickness = 2
+	valueStroke.Color = Color3.fromRGB(10, 12, 22)
+	valueStroke.Parent = value
+
+	return row
+end
+
+local function buildBoard(cf: CFrame, cat, parent: Instance)
+	local model = Build.model("Board_" .. cat.Id, parent)
+
+	-- Estructura
+	Build.part({ Name = "Base", Size = Vector3.new(SCREEN_W + 10, 8, 14), Color = Palette.Ink,
+		CFrame = cf * CFrame.new(0, 4, 0), Shadow = true }, model)
+	for _, side in ipairs({ -1, 1 }) do
+		Build.part({ Name = "Leg", Size = Vector3.new(5, 16, 5), Color = Palette.darken(cat.Accent, 0.35),
+			CFrame = cf * CFrame.new(side * (SCREEN_W / 2 - 3), 12, 0) }, model)
+	end
+
+	local screenY = 20 + SCREEN_H / 2
+	Build.part({ Name = "Frame", Size = Vector3.new(SCREEN_W + 6, SCREEN_H + 10, 3),
+		Color = Palette.darken(cat.Accent, 0.4), CFrame = cf * CFrame.new(0, screenY, 0), Shadow = true }, model)
+	Build.neon({ Name = "FrameGlow", Size = Vector3.new(SCREEN_W + 8, SCREEN_H + 12, 2),
+		Color = cat.Accent, Transparency = 0.25, CanCollide = false,
+		CFrame = cf * CFrame.new(0, screenY, -0.6) }, model)
+
+	local screen = Build.part({
+		Name = "Screen", Size = Vector3.new(SCREEN_W, SCREEN_H, 1), Color = Color3.fromRGB(16, 18, 30),
+		CFrame = cf * CFrame.new(0, screenY, 1.4), Stud = false, Material = Enum.Material.SmoothPlastic,
+	}, model)
+
+	-- Focos del tablero
+	for _, side in ipairs({ -1, 1 }) do
+		local bulb = Build.neon({ Name = "Spot", Size = Vector3.new(3, 3, 3), Color = cat.Accent,
+			CanCollide = false, CFrame = cf * CFrame.new(side * (SCREEN_W / 2 + 2), screenY + SCREEN_H / 2, 3) }, model)
+		Build.light(bulb, cat.Accent, 34, 3)
+	end
+
+	-- GUI
+	local gui = Instance.new("SurfaceGui")
+	gui.Name = "BoardGui"
+	gui.Face = Enum.NormalId.Front
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = PPS
+	gui.LightInfluence = 0
+	gui.MaxDistance = Config.Performance.BoardMaxDistance
+	gui.Active = true          -- permite interactuar con el scroll desde el mundo 3D
+	gui.ClipsDescendants = true
+	gui.Parent = screen
+
+	local bg = Instance.new("Frame")
+	bg.Name = "BG"
+	bg.Size = UDim2.fromScale(1, 1)
+	bg.BackgroundColor3 = Color3.fromRGB(14, 16, 28)
+	bg.BorderSizePixel = 0
+	bg.Parent = gui
+
+	local bgGrad = Instance.new("UIGradient")
+	bgGrad.Color = ColorSequence.new(Color3.fromRGB(20, 24, 42), Color3.fromRGB(10, 11, 20))
+	bgGrad.Rotation = 90
+	bgGrad.Parent = bg
+
+	-- Cabecera
+	local header = Instance.new("Frame")
+	header.Name = "Header"
+	header.Size = UDim2.new(1, 0, 0, 96)
+	header.BackgroundColor3 = Color3.fromRGB(22, 26, 46)
+	header.BorderSizePixel = 0
+	header.Parent = bg
+
+	local headGrad = Instance.new("UIGradient")
+	headGrad.Color = ColorSequence.new(cat.Accent, Palette.darken(cat.Accent, 0.55))
+	headGrad.Rotation = 90
+	headGrad.Transparency = NumberSequence.new(0.55)
+	headGrad.Parent = header
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.new(1, -24, 0, 56)
+	title.Position = UDim2.new(0, 12, 0, 6)
+	title.BackgroundTransparency = 1
+	title.Font = Enum.Font.FredokaOne
+	title.Text = cat.Title
+	title.TextColor3 = Palette.White
+	title.TextSize = 46
+	title.Parent = header
+
+	local titleStroke = Instance.new("UIStroke")
+	titleStroke.Thickness = 3
+	titleStroke.Color = Palette.darken(cat.Accent, 0.6)
+	titleStroke.Parent = title
+
+	local status = Instance.new("TextLabel")
+	status.Name = "Status"
+	status.Size = UDim2.new(1, -24, 0, 26)
+	status.Position = UDim2.new(0, 12, 0, 62)
+	status.BackgroundTransparency = 1
+	status.Font = Enum.Font.Gotham
+	status.Text = "Cargando ranking global..."
+	status.TextColor3 = Color3.fromRGB(165, 180, 215)
+	status.TextSize = 20
+	status.Parent = header
+
+	-- Lista
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "List"
+	scroll.Size = UDim2.new(1, -16, 1, -112)
+	scroll.Position = UDim2.new(0, 8, 0, 104)
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.ScrollBarThickness = 16
+	scroll.ScrollBarImageColor3 = cat.Accent
+	scroll.ScrollBarImageTransparency = 0.1
+	scroll.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.CanvasSize = UDim2.new(0, 0, 0, ROWS * (ROW_H + ROW_PAD) + 12)
+	scroll.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
+	scroll.Active = true
+	scroll.Parent = bg
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, ROW_PAD)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = scroll
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 4)
+	padding.PaddingLeft = UDim.new(0, 6)
+	padding.Parent = scroll
+
+	-- Botones de paginado (el cliente los conecta: BoardController)
+	local function pageButton(name: string, text: string, posY: number)
+		local b = Instance.new("TextButton")
+		b.Name = name
+		b.Size = UDim2.new(0, 54, 0, 44)
+		b.Position = UDim2.new(1, -62, 0, posY)
+		b.BackgroundColor3 = Palette.darken(cat.Accent, 0.4)
+		b.Text = text
+		b.Font = Enum.Font.FredokaOne
+		b.TextSize = 26
+		b.TextColor3 = Palette.White
+		b.AutoButtonColor = true
+		b.ZIndex = 5
+		b.Parent = bg
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, 10)
+		c.Parent = b
+		local s = Instance.new("UIStroke")
+		s.Color = cat.Accent
+		s.Thickness = 2
+		s.Parent = b
+		return b
+	end
+	pageButton("PageUp", "▲", 108)
+	pageButton("PageDown", "▼", 160)
+
+	local rows = {}
+	for i = 1, ROWS do
+		rows[i] = makeRow(scroll, i, cat.Accent)
+	end
+
+	boards[cat.Id] = { Rows = rows, Gui = gui, Status = status }
+	return model
+end
+
+-- ─────────────────────── REFRESCO DE DATOS ──────────────────────────────────
+function BoardBuilder.Render(categoryId: string, entries)
+	local board = boards[categoryId]
+	if not board then return end
+
+	local cat
+	for _, c in ipairs(Config.Leaderboards.Categories) do
+		if c.Id == categoryId then cat = c break end
+	end
+	if not cat then return end
+
+	for i = 1, ROWS do
+		local row = board.Rows[i]
+		local entry = entries[i]
+		local rank = row:FindFirstChild("Rank") :: TextLabel
+		local display = row:FindFirstChild("DisplayName") :: TextLabel
+		local username = row:FindFirstChild("Username") :: TextLabel
+		local value = row:FindFirstChild("Value") :: TextLabel
+		local holder = row:FindFirstChild("AvatarHolder") :: Frame
+		local avatar = holder and holder:FindFirstChild("Avatar") :: ImageLabel
+		local grad = row:FindFirstChild("Grad") :: UIGradient
+		local edge = row:FindFirstChild("Edge") :: UIStroke
+
+		if entry then
+			local medalColor = Palette.rankColor(i)
+			rank.Text = (i <= 3 and MEDALS[i] .. " " or "") .. "#" .. i
+			rank.TextColor3 = (i <= 3) and medalColor or Palette.White
+			display.Text = entry.DisplayName or ("Usuario" .. entry.UserId)
+			username.Text = "@" .. (entry.Username or tostring(entry.UserId))
+
+			if cat.IsTime then
+				value.Text = Format.hours(entry.Value)
+			else
+				value.Text = Format.comma(entry.Value) .. (cat.Suffix or "")
+			end
+
+			if avatar then
+				resolveThumb(entry.UserId, function(img)
+					if avatar.Parent then avatar.Image = img end
+				end)
+			end
+
+			if i <= 3 then
+				grad.Enabled = true
+				grad.Color = ColorSequence.new(medalColor, Color3.fromRGB(24, 26, 44))
+				grad.Transparency = NumberSequence.new(0.25)
+				row.BackgroundColor3 = Color3.fromRGB(38, 40, 62)
+				edge.Color = medalColor
+				edge.Transparency = 0
+				edge.Thickness = 3
+				if holder then
+					local st = holder:FindFirstChild("AvatarStroke") :: UIStroke
+					if st then st.Color = medalColor st.Thickness = 3 end
+				end
+			else
+				grad.Enabled = false
+				edge.Color = Color3.fromRGB(60, 70, 100)
+				edge.Thickness = 1.5
+			end
+			row.Visible = true
+		else
+			rank.Text = "#" .. i
+			rank.TextColor3 = Color3.fromRGB(90, 100, 130)
+			display.Text = "—"
+			username.Text = "puesto libre"
+			value.Text = "—"
+			if avatar then avatar.Image = "" end
+			grad.Enabled = false
+			row.Visible = true
+		end
+	end
+
+	board.Status.Text = ("%d jugadores · actualizado %s")
+		:format(#entries, os.date("!%H:%M UTC"))
+end
+
+function BoardBuilder.Build(parent: Instance?)
+	local folder = Build.folder("Leaderboards", parent or workspace:FindFirstChild("Lobby") or workspace)
+	for i, cat in ipairs(Config.Leaderboards.Categories) do
+		local cf = LobbyBuilder.Anchors.Boards[i] or CFrame.new(0, 0, -140 + i * 60)
+		buildBoard(cf, cat, folder)
+	end
+
+	-- Cartel de la zona
+	Build.sign(
+		CFrame.new(Config.Lobby.Origin + Vector3.new(0, 30, Config.Lobby.BoardsZ + 46)),
+		"🏆 SALÓN DE LA <b>FAMA</b> · TOP 100 GLOBAL",
+		{ Width = 60, Height = 10, Color = Palette.Ink, Accent = Palette.Gold }, folder
+	)
+
+	LeaderboardService.Updated.Event:Connect(function(categoryId, entries)
+		BoardBuilder.Render(categoryId, entries)
+	end)
+
+	-- Pinta lo que ya hubiera en caché
+	for _, cat in ipairs(Config.Leaderboards.Categories) do
+		BoardBuilder.Render(cat.Id, LeaderboardService.Get(cat.Id))
+	end
+
+	print("[BoardBuilder] 3 tableros Top 100 construidos")
+	return folder
+end
+
+return BoardBuilder
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX21">
+      <Properties>
+        <string name="Name">CombatService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	CombatService.lua
+	Ubicación en Roblox: ServerScriptService > Server > CombatService   (ModuleScript)
+
+	Combate 100% autoritativo en el servidor:
+	  · Arma "Stud Blaster" generada por código (sin assets externos)
+	  · Daño por raycast con cooldown y rango, respetando la invulnerabilidad
+	  · Atribución de kills, racha actual / máxima, monedas y KillFeed
+	  · Evento PlayerDied para que RoundService devuelva al jugador al lobby
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local Palette = require(Shared.Palette)
+local Build = require(Shared.Build)
+local DataService = require(script.Parent.DataService)
+local SpawnService = require(script.Parent.SpawnService)
+
+local CombatService = {}
+
+CombatService.PlayerDied = Instance.new("BindableEvent") -- (victim, killer?)
+CombatService.Enabled = false   -- solo durante la ronda
+
+local lastShot: { [Player]: number } = {}
+local CREDIT_WINDOW = 10 -- s para atribuir la kill
+
+-- ─────────────────────────── DAÑO CENTRAL ───────────────────────────────────
+function CombatService.ApplyDamage(targetCharacter: Model, amount: number, source: Player?)
+	if not targetCharacter or not targetCharacter.Parent then return false end
+	if SpawnService.IsInvulnerable(targetCharacter) then return false end
+
+	local humanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then return false end
+
+	if source then
+		targetCharacter:SetAttribute("LastDamagerId", source.UserId)
+		targetCharacter:SetAttribute("LastDamagerAt", os.clock())
+	end
+
+	humanoid:TakeDamage(amount)
+	return true
+end
+
+-- ─────────────────────────── ARMA GENERADA POR CÓDIGO ───────────────────────
+local function buildBlaster(): Tool
+	local tool = Instance.new("Tool")
+	tool.Name = Config.Combat.ToolName
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+	tool.ToolTip = "Dispara studs de energía"
+
+	local handle = Build.part({
+		Name = "Handle", Size = Vector3.new(1.2, 1.2, 4.2),
+		Color = Palette.Ink, Anchored = false, CanCollide = false,
+		Massless = true,
+	})
+	handle.Parent = tool
+
+	local barrel = Build.neon({
+		Name = "Barrel", Size = Vector3.new(0.7, 0.7, 2.2), Color = Palette.Cyan,
+		Anchored = false, CanCollide = false, Massless = true,
+	})
+	barrel.Parent = tool
+	-- La pose relativa se fija ANTES de crear el WeldConstraint.
+	barrel.CFrame = handle.CFrame * CFrame.new(0, 0.3, -2.6)
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = handle
+	weld.Part1 = barrel
+	weld.Parent = handle
+	Build.light(barrel, Palette.Cyan, 12, 2)
+
+	local muzzle = Instance.new("Attachment")
+	muzzle.Name = "Muzzle"
+	muzzle.Position = Vector3.new(0, 0.3, -3.4)
+	muzzle.Parent = handle
+
+	local sound = Instance.new("Sound")
+	sound.Name = "Fire"
+	sound.SoundId = Config.Sounds.Blaster
+	sound.Volume = 0.45
+	sound.Parent = handle
+
+	return tool
+end
+
+function CombatService.GiveWeapon(player: Player)
+	if player.Backpack:FindFirstChild(Config.Combat.ToolName) then return end
+	local character = player.Character
+	if character and character:FindFirstChild(Config.Combat.ToolName) then return end
+
+	local tool = buildBlaster()
+	tool.Parent = player.Backpack
+
+	tool.Activated:Connect(function()
+		CombatService.Fire(player, tool)
+	end)
+end
+
+function CombatService.RemoveWeapon(player: Player)
+	for _, container in ipairs({ player.Backpack, player.Character }) do
+		if container then
+			local t = container:FindFirstChild(Config.Combat.ToolName)
+			if t then t:Destroy() end
+		end
+	end
+end
+
+-- ─────────────────────────── DISPARO ────────────────────────────────────────
+function CombatService.Fire(player: Player, tool: Tool)
+	if not CombatService.Enabled then return end
+	local now = os.clock()
+	if (lastShot[player] or 0) + Config.Combat.Cooldown > now then return end
+	lastShot[player] = now
+
+	local character = player.Character
+	local head = character and character:FindFirstChild("Head") :: BasePart?
+	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not (character and head and root) then return end
+
+	local origin = head.Position
+	local direction = head.CFrame.LookVector * Config.Combat.Range
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	params.IgnoreWater = true
+
+	local result = Workspace:Raycast(origin, direction, params)
+	local hitPos = result and result.Position or (origin + direction)
+
+	if result and result.Instance then
+		local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
+		local humanoid = hitChar and hitChar:FindFirstChildOfClass("Humanoid")
+		if humanoid and hitChar ~= character then
+			local damage = Config.Combat.Damage
+			if result.Instance.Name == "Head" then
+				damage *= Config.Combat.HeadMultiplier
+			end
+			if player.Character and player.Character:GetAttribute("DoubleDamage") then
+				damage *= 2
+			end
+			CombatService.ApplyDamage(hitChar, damage, player)
+		end
+	end
+
+	Net.Event("CombatVFX"):FireAllClients({
+		From = origin, To = hitPos, Color = Palette.Cyan, Shooter = player.UserId,
+	})
+end
+
+-- ─────────────────────────── MUERTES Y ESTADÍSTICAS ─────────────────────────
+local function handleDeath(victim: Player, character: Model)
+	local killerId = character:GetAttribute("LastDamagerId")
+	local killedAt = character:GetAttribute("LastDamagerAt") or 0
+	local killer: Player? = nil
+
+	if killerId and (os.clock() - killedAt) <= CREDIT_WINDOW then
+		killer = Players:GetPlayerByUserId(killerId)
+	end
+	if killer == victim then killer = nil end
+
+	-- Estadísticas de la víctima
+	DataService.Update(victim, function(d)
+		d.Deaths += 1
+		d.Streak = 0
+	end)
+
+	-- Estadísticas del asesino
+	if killer then
+		DataService.Update(killer, function(d)
+			d.Kills += 1
+			d.Streak += 1
+			if d.Streak > d.BestStreak then d.BestStreak = d.Streak end
+			d.Coins += Config.Round.RewardKill
+		end)
+		local data = DataService.Get(killer)
+		Net.Event("KillFeed"):FireAllClients({
+			Killer = killer.DisplayName, Victim = victim.DisplayName,
+			Streak = data and data.Streak or 1,
+		})
+	else
+		Net.Event("KillFeed"):FireAllClients({
+			Killer = "", Victim = victim.DisplayName, Streak = 0,
+		})
+	end
+
+	CombatService.PlayerDied:Fire(victim, killer)
+end
+
+function CombatService.Init()
+	local function hook(player: Player)
+		player.CharacterAdded:Connect(function(character)
+			local humanoid = character:WaitForChild("Humanoid", 10)
+			if not humanoid or not humanoid:IsA("Humanoid") then return end
+			local died = false
+			humanoid.Died:Connect(function()
+				if died then return end
+				died = true
+				handleDeath(player, character)
+			end)
+		end)
+	end
+
+	Players.PlayerAdded:Connect(hook)
+	for _, p in ipairs(Players:GetPlayers()) do hook(p) end
+	Players.PlayerRemoving:Connect(function(p) lastShot[p] = nil end)
+
+	print("[CombatService] listo")
+end
+
+return CombatService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX22">
+      <Properties>
+        <string name="Name">DataService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	DataService.lua
+	Ubicación en Roblox: ServerScriptService > Server > DataService   (ModuleScript)
+
+	Persistencia con DataStoreService + OrderedDataStore:
+	  · carga con reintentos y pcall
+	  · bloqueo de sesión ligero (evita duplicar datos entre servidores)
+	  · autoguardado periódico escalonado
+	  · BindToClose (guarda todo antes de cerrar el servidor)
+	  · publicación a los 3 OrderedDataStore del Top 100
+	  · leaderstats + sincronización al cliente (DataSync)
+]]
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+
+local DataService = {}
+
+local store = DataStoreService:GetDataStore(Config.Data.PlayerStoreKey, Config.Data.Scope)
+local orderedStores = {
+	Kills      = DataStoreService:GetOrderedDataStore(Config.Data.OrderedKills),
+	BestStreak = DataStoreService:GetOrderedDataStore(Config.Data.OrderedStreak),
+	Playtime   = DataStoreService:GetOrderedDataStore(Config.Data.OrderedPlaytime),
+}
+
+local JOB = game.JobId ~= "" and game.JobId or ("studio-" .. tostring(math.random(1, 1e6)))
+local STUDIO_NO_API = false -- se detecta en runtime si DataStore no está disponible
+
+local profiles: { [Player]: { Data: { [string]: any }, Loaded: boolean, Dirty: boolean, LastPublish: number } } = {}
+
+DataService.Changed = Instance.new("BindableEvent") -- (player, data)
+
+local function deepCopy(t)
+	local out = {}
+	for k, v in pairs(t) do
+		out[k] = (type(v) == "table") and deepCopy(v) or v
+	end
+	return out
+end
+
+local function reconcile(data)
+	for key, value in pairs(Config.DefaultData) do
+		if data[key] == nil then
+			data[key] = (type(value) == "table") and deepCopy(value) or value
+		end
+	end
+	return data
+end
+
+local function retry(fn, label: string)
+	local attempts = Config.Data.RetryCount
+	for i = 1, attempts do
+		local ok, result = pcall(fn)
+		if ok then return true, result end
+		warn(("[DataService] %s falló (intento %d/%d): %s"):format(label, i, attempts, tostring(result)))
+		if i == 1 and tostring(result):find("403") then
+			STUDIO_NO_API = true
+			return false, nil
+		end
+		task.wait(Config.Data.RetryWait * i)
+	end
+	return false, nil
+end
+
+local function key(userId: number): string
+	return "u_" .. tostring(userId)
+end
+
+-- ─────────────────────────────── LEADERSTATS ────────────────────────────────
+local function buildLeaderstats(player: Player, data)
+	local ls = player:FindFirstChild("leaderstats") or Instance.new("Folder")
+	ls.Name = "leaderstats"
+	ls.Parent = player
+
+	local function stat(name: string, value: number)
+		local v = ls:FindFirstChild(name) or Instance.new("IntValue")
+		v.Name = name
+		v.Value = value
+		v.Parent = ls
+		return v
+	end
+
+	stat("Kills", data.Kills)
+	stat("Racha", data.Streak)
+	stat("Monedas", data.Coins)
+end
+
+local function pushToClient(player: Player, data)
+	local ok = pcall(function()
+		Net.Event("DataSync"):FireClient(player, {
+			Kills = data.Kills, Deaths = data.Deaths, Streak = data.Streak,
+			BestStreak = data.BestStreak, Playtime = data.Playtime, Coins = data.Coins,
+			Wins = data.Wins, Pets = data.Pets, Purchases = data.Purchases,
+		})
+	end)
+	if not ok and Config.Debug then warn("[DataService] No se pudo sincronizar con el cliente") end
+end
+
+-- ─────────────────────────────── CARGA ──────────────────────────────────────
+function DataService.Load(player: Player)
+	if profiles[player] then return profiles[player].Data end
+
+	local loaded = nil
+	if not STUDIO_NO_API then
+		local ok, result = retry(function()
+			return store:UpdateAsync(key(player.UserId), function(old)
+				old = old or {}
+				-- bloqueo de sesión ligero: si otro servidor lo tiene tomado hace poco, igual
+				-- cargamos pero dejamos marca para no pisar datos recién guardados.
+				old.__lock = { Job = JOB, At = os.time() }
+				return old
+			end)
+		end, "Load " .. player.Name)
+		if ok then loaded = result end
+	end
+
+	local data = reconcile(loaded and deepCopy(loaded) or deepCopy(Config.DefaultData))
+	data.__lock = nil
+
+	profiles[player] = { Data = data, Loaded = true, Dirty = false, LastPublish = 0 }
+	buildLeaderstats(player, data)
+	pushToClient(player, data)
+	DataService.Changed:Fire(player, data)
+	return data
+end
+
+--- Devuelve los datos (espera a que terminen de cargar, máx. 20 s).
+function DataService.Get(player: Player)
+	local t0 = os.clock()
+	while not profiles[player] and os.clock() - t0 < 20 and player.Parent do
+		task.wait(0.1)
+	end
+	local profile = profiles[player]
+	return profile and profile.Data or nil
+end
+
+function DataService.IsLoaded(player: Player): boolean
+	return profiles[player] ~= nil
+end
+
+--- Modifica datos de forma segura: DataService.Update(player, function(d) d.Coins += 10 end)
+function DataService.Update(player: Player, fn: (any) -> ())
+	local data = DataService.Get(player)
+	if not data then return nil end
+	fn(data)
+
+	data.Kills = math.max(0, math.floor(data.Kills))
+	data.Coins = math.max(0, math.floor(data.Coins))
+	data.Streak = math.max(0, math.floor(data.Streak))
+	data.BestStreak = math.max(data.BestStreak, data.Streak)
+
+	profiles[player].Dirty = true
+	buildLeaderstats(player, data)
+	pushToClient(player, data)
+	DataService.Changed:Fire(player, data)
+	return data
+end
+
+function DataService.AddCoins(player: Player, amount: number)
+	return DataService.Update(player, function(d) d.Coins += amount end)
+end
+
+function DataService.TrySpend(player: Player, amount: number): boolean
+	local data = DataService.Get(player)
+	if not data or data.Coins < amount then return false end
+	DataService.Update(player, function(d) d.Coins -= amount end)
+	return true
+end
+
+-- ─────────────────────────────── GUARDADO ───────────────────────────────────
+local function publishOrdered(player: Player, data)
+	if STUDIO_NO_API then return end
+	for statName, ds in pairs(orderedStores) do
+		local value = math.floor(tonumber(data[statName]) or 0)
+		if value > 0 then
+			pcall(function()
+				ds:SetAsync(tostring(player.UserId), value)
+			end)
+		end
+	end
+end
+
+function DataService.Save(player: Player, isFinal: boolean?)
+	local profile = profiles[player]
+	if not profile or not profile.Loaded then return false end
+	local data = profile.Data
+
+	if STUDIO_NO_API then
+		profile.Dirty = false
+		return false
+	end
+
+	local ok = retry(function()
+		return store:UpdateAsync(key(player.UserId), function(old)
+			local payload = deepCopy(data)
+			payload.__lock = isFinal and nil or { Job = JOB, At = os.time() }
+			payload.__savedAt = os.time()
+			return payload
+		end)
+	end, "Save " .. player.Name)
+
+	if ok then
+		profile.Dirty = false
+		publishOrdered(player, data)
+	end
+	return ok
+end
+
+function DataService.Release(player: Player)
+	DataService.Save(player, true)
+	profiles[player] = nil
+end
+
+-- ─────────────────────────────── CICLO DE VIDA ──────────────────────────────
+function DataService.Init()
+	Players.PlayerAdded:Connect(function(player)
+		task.spawn(DataService.Load, player)
+	end)
+	for _, p in ipairs(Players:GetPlayers()) do
+		task.spawn(DataService.Load, p)
+	end
+
+	Players.PlayerRemoving:Connect(function(player)
+		DataService.Release(player)
+	end)
+
+	-- Autoguardado escalonado: nunca todos a la vez.
+	task.spawn(function()
+		while true do
+			task.wait(Config.Data.AutosaveInterval)
+			for _, player in ipairs(Players:GetPlayers()) do
+				local profile = profiles[player]
+				if profile and profile.Dirty then
+					task.spawn(DataService.Save, player)
+					task.wait(0.6)
+				end
+			end
+		end
+	end)
+
+	game:BindToClose(function()
+		if RunService:IsStudio() then return end
+		local list = Players:GetPlayers()
+		local remaining = #list
+		for _, player in ipairs(list) do
+			task.spawn(function()
+				DataService.Save(player, true)
+				remaining -= 1
+			end)
+		end
+		local t0 = os.clock()
+		while remaining > 0 and os.clock() - t0 < 25 do
+			task.wait(0.2)
+		end
+	end)
+
+	print("[DataService] listo")
+end
+
+return DataService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX23">
+      <Properties>
+        <string name="Name">EggService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	EggService.lua
+	Ubicación en Roblox: ServerScriptService > Server > EggService   (ModuleScript)
+
+	Zona de huevos abribles:
+	  · Pedestales con el huevo flotante (gira en el CLIENTE, cero coste de red)
+	  · Cartel con rareza, probabilidades y precio
+	  · Apertura validada en servidor (tirada ponderada) y animación sincronizada
+	    cliente-servidor mediante el RemoteEvent EggVFX + respuesta del RemoteFunction
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Palette = require(Shared.Palette)
+local Build = require(Shared.Build)
+local Net = require(Shared.Net)
+
+local DataService = require(script.Parent.DataService)
+local LobbyBuilder = require(script.Parent.LobbyBuilder)
+local LobbyEventService = require(script.Parent.LobbyEventService)
+
+local EggService = {}
+
+local eggById: { [string]: any } = {}
+local eggPositions: { [string]: Vector3 } = {}
+for _, egg in ipairs(Config.Eggs) do
+	eggById[egg.Id] = egg
+end
+
+-- ─────────────────────── PEDESTALES ─────────────────────────────────────────
+local function rarityText(egg): string
+	local total = 0
+	for _, r in ipairs(egg.Rewards) do total += r.Weight end
+	local lines = {}
+	for _, r in ipairs(egg.Rewards) do
+		local color = Config.RarityColors[r.Rarity] or Palette.White
+		table.insert(lines, ('<font color="rgb(%d,%d,%d)">%s</font>  <b>%.1f%%</b>'):format(
+			math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255),
+			r.Name, (r.Weight / total) * 100))
+	end
+	return table.concat(lines, "\n")
+end
+
+local function buildPedestal(egg, cf: CFrame, parent: Instance)
+	local model = Build.model("Egg_" .. egg.Id, parent)
+
+	Build.part({ Name = "Base", Size = Vector3.new(14, 3, 14), Color = Palette.White,
+		CFrame = cf * CFrame.new(0, 1.5, 0), Shadow = true }, model)
+	Build.part({ Name = "Column", Size = Vector3.new(8, 9, 8), Color = Palette.darken(egg.Accent, 0.2),
+		CFrame = cf * CFrame.new(0, 7.5, 0) }, model)
+	Build.neon({ Name = "ColumnGlow", Size = Vector3.new(9, 0.8, 9), Color = egg.Color,
+		CFrame = cf * CFrame.new(0, 12.4, 0), CanCollide = false, Transparency = 0.3 }, model)
+
+	-- Huevo (elipsoide con bandas stud)
+	local eggPart = Build.sphere({
+		Name = "EggBody", Size = Vector3.new(8, 10, 8), Color = egg.Color,
+		CFrame = cf * CFrame.new(0, 19, 0), CanCollide = false, Stud = false,
+		Tags = { "StudSpin" },
+	}, model, Vector3.new(0.8, 1.05, 0.8))
+	for i = 1, 2 do
+		Build.part({
+			Name = "Band", Size = Vector3.new(8.4, 1.2, 8.4), Color = egg.Accent, CanCollide = false,
+			CFrame = cf * CFrame.new(0, 17 + i * 2.4, 0),
+		}, model)
+	end
+	Build.light(eggPart, egg.Color, 30, 3)
+
+	-- Halo
+	Build.neon({ Name = "Halo", Size = Vector3.new(16, 0.4, 16), Color = egg.Color, Transparency = 0.55,
+		CanCollide = false, CFrame = cf * CFrame.new(0, 13.5, 0), Tags = { "StudSpin" } }, model)
+
+	-- Cartel de información
+	Build.billboard(eggPart, ("<b>%s</b>\n<font size=\"16\">%d ◉</font>\n<font size=\"13\">%s</font>")
+		:format(egg.Name, egg.Price, rarityText(egg)), {
+		Name = "EggInfo", Size = UDim2.new(0, 230, 0, 160), StudsOffset = Vector3.new(0, 7, 0),
+		MaxDistance = 80, TextColor = Palette.White,
+	})
+
+	local prompt = Build.prompt(eggPart, "Abrir huevo", egg.Name, 14)
+	prompt:SetAttribute("EggId", egg.Id)
+	prompt.Name = "EggPrompt"
+
+	eggPositions[egg.Id] = (cf * CFrame.new(0, 19, 0)).Position
+	return model
+end
+
+function EggService.Build(parent: Instance?)
+	local folder = Build.folder("EggZone", parent or workspace:FindFirstChild("Lobby") or workspace)
+
+	-- Plaza de huevos
+	Build.part({ Name = "EggPlaza", Size = Vector3.new(120, 2, 60), Color = Palette.lighten(Palette.Violet, 0.35),
+		Position = Config.Lobby.EggZone + Vector3.new(0, 1, 0), Shadow = true }, folder)
+	Build.sign(CFrame.new(Config.Lobby.EggZone + Vector3.new(0, 26, -22)), "🥚 ZONA DE <b>HUEVOS</b>", {
+		Width = 40, Height = 9, Color = Palette.Ink, Accent = Palette.Magenta,
+	}, folder)
+
+	for i, egg in ipairs(Config.Eggs) do
+		local cf = LobbyBuilder.Anchors.Eggs[i]
+		if cf then buildPedestal(egg, cf, folder) end
+	end
+
+	print(("[EggService] %d huevos construidos"):format(#Config.Eggs))
+	return folder
+end
+
+-- ─────────────────────── APERTURA (SERVIDOR) ────────────────────────────────
+local function roll(egg, luckyBonus: number)
+	local total = 0
+	for _, r in ipairs(egg.Rewards) do
+		total += r.Weight * (r.Rarity ~= "Común" and (1 + luckyBonus) or 1)
+	end
+	local pick = Random.new(os.clock() * 1e6 + math.random(1, 1e6)):NextNumber() * total
+	local acc = 0
+	for _, r in ipairs(egg.Rewards) do
+		acc += r.Weight * (r.Rarity ~= "Común" and (1 + luckyBonus) or 1)
+		if pick <= acc then return r end
+	end
+	return egg.Rewards[#egg.Rewards]
+end
+
+function EggService.Init()
+	Net.Func("OpenEgg").OnServerInvoke = function(player, eggId)
+		if typeof(eggId) ~= "string" then return { ok = false, message = "Petición inválida" } end
+		local egg = eggById[eggId]
+		if not egg then return { ok = false, message = "Ese huevo no existe" } end
+
+		local data = DataService.Get(player)
+		if not data then return { ok = false, message = "Datos cargando..." } end
+
+		-- Descuento por evento del lobby (FIESTA DE HUEVOS)
+		local price = math.floor(egg.Price * LobbyEventService.GetEggDiscount())
+		if data.Coins < price then
+			return { ok = false, message = ("Te faltan %d monedas"):format(price - data.Coins) }
+		end
+
+		local lucky = data.Purchases["pet_lucky"] and 0.15 or 0
+		local reward = roll(egg, lucky)
+
+		DataService.Update(player, function(d)
+			d.Coins -= price
+			d.Pets[reward.Id] = (d.Pets[reward.Id] or 0) + 1
+			if d.EquippedPet == "" then d.EquippedPet = reward.Id end
+		end)
+
+		-- Efecto visible para todos los que estén cerca del pedestal
+		Net.Event("EggVFX"):FireAllClients({
+			Position = eggPositions[eggId] or Config.Lobby.EggZone,
+			Color = egg.Color,
+			RewardColor = reward.Color,
+			Rarity = reward.Rarity,
+			PlayerName = player.DisplayName,
+		})
+
+		return {
+			ok = true,
+			eggId = eggId,
+			reward = { Id = reward.Id, Name = reward.Name, Rarity = reward.Rarity, Color = reward.Color },
+			price = price,
+			coins = DataService.Get(player).Coins,
+		}
+	end
+
+	print("[EggService] listo")
+end
+
+return EggService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX24">
+      <Properties>
+        <string name="Name">LeaderboardService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	LeaderboardService.lua
+	Ubicación en Roblox: ServerScriptService > Server > LeaderboardService   (ModuleScript)
+
+	Lee los 3 OrderedDataStore (Kills / Racha / Horas jugadas), resuelve nombres
+	con UserService, guarda un caché en memoria y avisa a quien lo necesite
+	(tableros físicos, títulos 3D y anuncios de chat).
+
+	· Una sola lectura cada Config.Leaderboards.RefreshInterval segundos
+	· Todo con pcall: si el DataStore falla, se conserva el caché anterior
+	· Fallback local en Studio sin acceso a API (para poder probar los tableros)
+]]
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserService = game:GetService("UserService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local DataService = require(script.Parent.DataService)
+
+local LeaderboardService = {}
+
+LeaderboardService.Updated = Instance.new("BindableEvent") -- (categoryId, entries)
+LeaderboardService.Cache = {}  -- [categoryId] = { {UserId, Value, Username, DisplayName, Rank} }
+LeaderboardService.Ranks = {}  -- [userId] = { [categoryId] = rank }
+
+local nameCache: { [number]: { Username: string, DisplayName: string } } = {}
+local stores = {}
+
+for _, cat in ipairs(Config.Leaderboards.Categories) do
+	local storeName = Config.Data[cat.Store]
+	local ok, ds = pcall(function()
+		return DataStoreService:GetOrderedDataStore(storeName)
+	end)
+	stores[cat.Id] = ok and ds or nil
+	LeaderboardService.Cache[cat.Id] = {}
+end
+
+-- ─────────────────────────── NOMBRES (con caché) ────────────────────────────
+local function resolveNames(userIds: { number })
+	local missing = {}
+	for _, id in ipairs(userIds) do
+		if not nameCache[id] then table.insert(missing, id) end
+	end
+	if #missing == 0 then return end
+
+	-- UserService admite lotes; lo partimos en bloques de 100
+	for i = 1, #missing, 100 do
+		local chunk = {}
+		for j = i, math.min(i + 99, #missing) do
+			table.insert(chunk, missing[j])
+		end
+		local ok, infos = pcall(function()
+			return UserService:GetUserInfosByUserIdsAsync(chunk)
+		end)
+		if ok and infos then
+			for _, info in ipairs(infos) do
+				nameCache[info.Id] = { Username = info.Username, DisplayName = info.DisplayName }
+			end
+		end
+		-- Lo que no se resolvió, intento individual (API antigua)
+		for _, id in ipairs(chunk) do
+			if not nameCache[id] then
+				local ok2, name = pcall(function()
+					return Players:GetNameFromUserIdAsync(id)
+				end)
+				nameCache[id] = { Username = ok2 and name or ("Usuario" .. id), DisplayName = ok2 and name or ("Usuario" .. id) }
+			end
+		end
+		task.wait(0.05)
+	end
+end
+
+function LeaderboardService.GetName(userId: number)
+	return nameCache[userId] or { Username = "Usuario" .. userId, DisplayName = "Usuario" .. userId }
+end
+
+-- ─────────────────────────── FALLBACK LOCAL ─────────────────────────────────
+-- En Studio sin API habilitada, mostramos a los jugadores del servidor para
+-- que los tableros no se vean vacíos mientras desarrollas.
+local function localFallback(cat)
+	local entries = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		local data = DataService.IsLoaded(player) and DataService.Get(player) or nil
+		if data then
+			table.insert(entries, {
+				UserId = player.UserId,
+				Value = math.floor(tonumber(data[cat.Stat]) or 0),
+				Username = player.Name,
+				DisplayName = player.DisplayName,
+			})
+		end
+	end
+	table.sort(entries, function(a, b) return a.Value > b.Value end)
+	for i, e in ipairs(entries) do e.Rank = i end
+	return entries
+end
+
+-- ─────────────────────────── REFRESCO ───────────────────────────────────────
+function LeaderboardService.RefreshCategory(cat)
+	local entries = {}
+	local ds = stores[cat.Id]
+
+	if ds then
+		local ok, pages = pcall(function()
+			return ds:GetSortedAsync(false, Config.Leaderboards.TopCount)
+		end)
+		if ok and pages then
+			local ok2, page = pcall(function() return pages:GetCurrentPage() end)
+			if ok2 and page then
+				local ids = {}
+				for rank, item in ipairs(page) do
+					local userId = tonumber(item.key)
+					if userId then
+						table.insert(entries, { UserId = userId, Value = item.value, Rank = rank })
+						table.insert(ids, userId)
+					end
+					if rank >= Config.Leaderboards.TopCount then break end
+				end
+				resolveNames(ids)
+				for _, e in ipairs(entries) do
+					local n = LeaderboardService.GetName(e.UserId)
+					e.Username = n.Username
+					e.DisplayName = n.DisplayName
+				end
+			end
+		end
+	end
+
+	if #entries == 0 then
+		entries = localFallback(cat)
+	end
+
+	LeaderboardService.Cache[cat.Id] = entries
+
+	-- Índice de rangos para títulos 3D y anuncios de chat
+	for _, e in ipairs(entries) do
+		LeaderboardService.Ranks[e.UserId] = LeaderboardService.Ranks[e.UserId] or {}
+		LeaderboardService.Ranks[e.UserId][cat.Id] = e.Rank
+	end
+
+	LeaderboardService.Updated:Fire(cat.Id, entries)
+	return entries
+end
+
+function LeaderboardService.RefreshAll()
+	for _, cat in ipairs(Config.Leaderboards.Categories) do
+		LeaderboardService.RefreshCategory(cat)
+		task.wait(0.35) -- respeta los límites del DataStore
+	end
+end
+
+function LeaderboardService.Get(categoryId: string)
+	return LeaderboardService.Cache[categoryId] or {}
+end
+
+--- Rangos de un jugador en todas las categorías: { Kills = 4, Streak = nil, ... }
+function LeaderboardService.GetRanks(userId: number)
+	return LeaderboardService.Ranks[userId] or {}
+end
+
+--- Mejor puesto global de un jugador (el número más bajo).
+function LeaderboardService.GetBestRank(userId: number): (number?, string?)
+	local best, bestCat = nil, nil
+	for catId, rank in pairs(LeaderboardService.GetRanks(userId)) do
+		if not best or rank < best then best, bestCat = rank, catId end
+	end
+	return best, bestCat
+end
+
+function LeaderboardService.Init()
+	Net.Func("GetLeaderboard").OnServerInvoke = function(_player, categoryId)
+		return LeaderboardService.Get(categoryId)
+	end
+
+	task.spawn(function()
+		task.wait(3) -- deja cargar los datos de los primeros jugadores
+		while true do
+			LeaderboardService.RefreshAll()
+			task.wait(Config.Leaderboards.RefreshInterval)
+		end
+	end)
+
+	print("[LeaderboardService] listo")
+end
+
+return LeaderboardService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX25">
+      <Properties>
+        <string name="Name">LobbyBuilder</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	LobbyBuilder.lua
+	Ubicación en Roblox: ServerScriptService > Server > LobbyBuilder   (ModuleScript)
+
+	Construye el lobby completo por código con estética Stud:
+	suelo en damero, caminos, muros con remate neón, plaza central con fuente,
+	zona de aparición (SpawnLocations con Duration = 0), bosque procedural de
+	árboles de colores, faroles, escenario de eventos e iluminación optimizada.
+
+	Expone LobbyBuilder.Anchors con las CFrames donde el resto de servicios
+	(tiendas, huevos, tableros) montan su contenido.
+]]
+
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Palette = require(Shared.Palette)
+local Build = require(Shared.Build)
+local TreeGenerator = require(Shared.TreeGenerator)
+local StudMaterial = require(Shared.StudMaterial)
+
+local SpawnService = require(script.Parent.SpawnService)
+
+local LobbyBuilder = {}
+
+LobbyBuilder.Anchors = {
+	Shops = {} :: { [string]: CFrame },  -- [shopId] = CFrame
+	Eggs = {} :: { CFrame },             -- [índice del huevo]
+	Boards = {} :: { CFrame },           -- [1..3] tableros Top 100
+	EventStage = CFrame.new(),
+}
+
+local LOBBY = Config.Lobby
+local ORIGIN = LOBBY.Origin
+
+-- ─────────────────────────── ILUMINACIÓN ────────────────────────────────────
+function LobbyBuilder.SetupLighting()
+	Lighting.Ambient = Color3.fromRGB(104, 112, 140)
+	Lighting.OutdoorAmbient = Color3.fromRGB(136, 148, 178)
+	Lighting.Brightness = 2.6
+	Lighting.ClockTime = 14.3
+	Lighting.GeographicLatitude = 12
+	Lighting.ExposureCompensation = 0.12
+	Lighting.EnvironmentDiffuseScale = 0.45
+	Lighting.EnvironmentSpecularScale = 0.35
+	Lighting.GlobalShadows = true
+	Lighting.ShadowSoftness = 0.25
+	Lighting.FogColor = Color3.fromRGB(176, 220, 255)
+	Lighting.FogStart = 220
+	Lighting.FogEnd = 1250
+
+	-- Technology es de solo lectura en runtime: se configura en Studio (README).
+	pcall(function() Lighting.Technology = Enum.Technology.Future end)
+
+	local atmo = Lighting:FindFirstChildOfClass("Atmosphere") or Instance.new("Atmosphere")
+	atmo.Density = 0.32
+	atmo.Offset = 0.1
+	atmo.Color = Color3.fromRGB(205, 225, 255)
+	atmo.Decay = Color3.fromRGB(110, 140, 190)
+	atmo.Glare = 0.25
+	atmo.Haze = 1.4
+	atmo.Parent = Lighting
+
+	local bloom = Lighting:FindFirstChildOfClass("BloomEffect") or Instance.new("BloomEffect")
+	bloom.Intensity = 0.55
+	bloom.Size = 22
+	bloom.Threshold = 1.05
+	bloom.Parent = Lighting
+
+	local cc = Lighting:FindFirstChildOfClass("ColorCorrectionEffect") or Instance.new("ColorCorrectionEffect")
+	cc.Name = "LobbyGrade"
+	cc.Saturation = 0.18
+	cc.Contrast = 0.09
+	cc.Brightness = 0.01
+	cc.TintColor = Color3.fromRGB(255, 252, 248)
+	cc.Parent = Lighting
+
+	local sky = Lighting:FindFirstChildOfClass("Sky") or Instance.new("Sky")
+	sky.SkyboxBk = ""
+	sky.StarCount = 1200
+	sky.SunAngularSize = 14
+	sky.MoonAngularSize = 9
+	sky.Parent = Lighting
+end
+
+-- ─────────────────────────── PIEZAS ─────────────────────────────────────────
+local function buildFloor(parent: Instance)
+	Build.checkerFloor(ORIGIN, LOBBY.FloorSize, LOBBY.TileSize, Palette.FloorA, Palette.FloorB, parent)
+
+	-- Césped perimetral (donde van los árboles)
+	local gs = LOBBY.FloorSize
+	for _, side in ipairs({ -1, 1 }) do
+		Build.part({
+			Name = "Lawn", Size = Vector3.new(90, 4, gs.Z + 120),
+			Color = Palette.Grass,
+			Position = ORIGIN + Vector3.new(side * (gs.X / 2 + 45), -2, 0),
+		}, parent)
+		Build.part({
+			Name = "Lawn", Size = Vector3.new(gs.X + 180, 4, 90),
+			Color = Palette.GrassAlt,
+			Position = ORIGIN + Vector3.new(0, -2, side * (gs.Z / 2 + 45)),
+		}, parent)
+	end
+end
+
+local function buildWalls(parent: Instance)
+	local gs = LOBBY.FloorSize
+	local h = LOBBY.WallHeight
+	local halfX, halfZ = gs.X / 2 + 90, gs.Z / 2 + 90
+
+	local sides = {
+		{ Vector3.new(0, h / 2, -halfZ), Vector3.new(halfX * 2, h, 6) },
+		{ Vector3.new(0, h / 2, halfZ),  Vector3.new(halfX * 2, h, 6) },
+		{ Vector3.new(-halfX, h / 2, 0), Vector3.new(6, h, halfZ * 2) },
+		{ Vector3.new(halfX, h / 2, 0),  Vector3.new(6, h, halfZ * 2) },
+	}
+	for i, s in ipairs(sides) do
+		local color = (i % 2 == 0) and Palette.Violet or Palette.Turquoise
+		Build.part({ Name = "Wall", Size = s[2], Color = Palette.darken(color, 0.3), Position = ORIGIN + s[1] }, parent)
+		Build.neon({
+			Name = "WallTrim", Size = s[2] + Vector3.new(0.6, -h + 1.2, 0.6), Color = color,
+			Position = ORIGIN + s[1] + Vector3.new(0, h / 2 + 0.4, 0), Transparency = 0.1, CanCollide = false,
+		}, parent)
+	end
+end
+
+local function buildPlaza(parent: Instance)
+	-- Plataforma circular escalonada
+	for i = 1, 3 do
+		local r = 62 - i * 10
+		Build.cylinder({
+			Name = "PlazaTier", Size = Vector3.new(1.6, r * 2, r * 2),
+			Color = (i % 2 == 0) and Palette.White or Palette.lighten(Palette.FloorA, 0.25),
+			CFrame = CFrame.new(ORIGIN + Vector3.new(0, 0.8 + (i - 1) * 1.5, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+		}, parent)
+	end
+
+	-- Fuente / monumento de studs
+	local base = Build.part({
+		Name = "FountainBase", Size = Vector3.new(26, 4, 26), Color = Palette.White,
+		Position = ORIGIN + Vector3.new(0, 6, 0), Shadow = true,
+	}, parent)
+	Build.ring(ORIGIN + Vector3.new(0, 9, 0), 12, 12, Vector3.new(3, 3, 3), Palette.Turquoise, parent)
+
+	local stack = { Palette.Magenta, Palette.Yellow, Palette.Lime, Palette.Cyan }
+	for i, color in ipairs(stack) do
+		Build.part({
+			Name = "Monument", Size = Vector3.new(14 - i * 2, 6, 14 - i * 2), Color = color,
+			CFrame = CFrame.new(ORIGIN + Vector3.new(0, 8 + i * 6, 0)) * CFrame.Angles(0, math.rad(i * 18), 0),
+			Shadow = i == 1,
+		}, parent)
+	end
+	local crown = Build.neon({
+		Name = "Crown", Size = Vector3.new(6, 6, 6), Color = Palette.White, CanCollide = false,
+		CFrame = CFrame.new(ORIGIN + Vector3.new(0, 8 + #stack * 6 + 5, 0)) * CFrame.Angles(math.rad(45), 0, math.rad(45)),
+		Tags = { "StudSpin" },
+	}, parent)
+	Build.light(crown, Palette.White, 48, 4)
+	base.Name = "FountainBase"
+
+	Build.billboard(crown, ("<b>%s</b>"):format(Config.GameName), {
+		Name = "LobbyTitle", Size = UDim2.new(0, 420, 0, 90), StudsOffset = Vector3.new(0, 7, 0),
+		MaxDistance = 260, TextColor = Palette.White, StrokeColor = Palette.Ink,
+	})
+end
+
+local function buildSpawnZone(parent: Instance): { CFrame }
+	local z = LOBBY.SpawnZ
+	local center = ORIGIN + Vector3.new(0, 0, z)
+
+	Build.part({
+		Name = "SpawnPad", Size = Vector3.new(86, 3, 60), Color = Palette.lighten(Palette.Lime, 0.1),
+		Position = center + Vector3.new(0, 1.5, 0), Shadow = true,
+	}, parent)
+	Build.neon({
+		Name = "SpawnPadGlow", Size = Vector3.new(90, 0.6, 64), Color = Palette.Lime,
+		Position = center + Vector3.new(0, 3.1, 0), Transparency = 0.45, CanCollide = false,
+	}, parent)
+
+	Build.arch(CFrame.new(center + Vector3.new(0, 3, -32)), 46, 26, Palette.darken(Palette.Violet, 0.25), Palette.Magenta, parent)
+	Build.sign(CFrame.new(center + Vector3.new(0, 26, -32)), "BIENVENIDO AL <b>LOBBY</b>", {
+		Width = 44, Height = 9, Color = Palette.Ink, Accent = Palette.Magenta,
+	}, parent)
+
+	local spawns = {}
+	local cols, rows = 4, 2
+	for ix = 1, cols do
+		for iz = 1, rows do
+			local pos = center + Vector3.new((ix - (cols + 1) / 2) * 18, 3.2, (iz - (rows + 1) / 2) * 18)
+			local sl = Instance.new("SpawnLocation")
+			sl.Name = "LobbySpawn"
+			sl.Size = Vector3.new(10, 1, 10)
+			sl.Position = pos
+			sl.Anchored = true
+			sl.CanCollide = true
+			sl.Transparency = 0.35
+			sl.Material = Enum.Material.Neon
+			sl.Color = Palette.Turquoise
+			sl.Duration = 0          -- ← SIN ForceField azul clásico
+			sl.Neutral = true
+			sl.AllowTeamChangeOnTouch = false
+			StudMaterial.smooth(sl)
+			sl.Parent = parent
+			table.insert(spawns, CFrame.lookAt(pos + Vector3.new(0, 3, 0), pos + Vector3.new(0, 3, -30)))
+		end
+	end
+	return spawns
+end
+
+local function buildPaths(parent: Instance)
+	local y = 0.2
+	local targets = {
+		ORIGIN + Vector3.new(0, y, LOBBY.SpawnZ - 34),
+		ORIGIN + Vector3.new(0, y, LOBBY.BoardsZ + 38),
+		ORIGIN + Vector3.new(LOBBY.ShopX - 26, y, 0),
+		ORIGIN + Vector3.new(-(LOBBY.ShopX - 26), y, 0),
+		LOBBY.EggZone + Vector3.new(0, y, 24),
+		LOBBY.EventStage + Vector3.new(0, y, 0),
+	}
+	for _, target in ipairs(targets) do
+		Build.path(ORIGIN + Vector3.new(0, y, 0), target, 10, Palette.PathA, Palette.PathB, parent)
+	end
+end
+
+local function buildLamps(parent: Instance)
+	local spots = {}
+	for i = 1, 10 do
+		local ang = (i / 10) * math.pi * 2
+		table.insert(spots, ORIGIN + Vector3.new(math.cos(ang) * 86, 0, math.sin(ang) * 86))
+	end
+	for _, z in ipairs({ -110, -60, 60, 110 }) do
+		table.insert(spots, ORIGIN + Vector3.new(-150, 0, z))
+		table.insert(spots, ORIGIN + Vector3.new(150, 0, z))
+	end
+	for i, pos in ipairs(spots) do
+		local color = Palette.Neon[((i - 1) % #Palette.Neon) + 1]
+		Build.lamp(CFrame.new(pos), color, parent, 15)
+	end
+end
+
+local function buildEventStage(parent: Instance)
+	local cf = CFrame.new(LOBBY.EventStage)
+	LobbyBuilder.Anchors.EventStage = cf
+
+	local stage = Build.model("EventStage", parent)
+	Build.part({ Name = "StageFloor", Size = Vector3.new(52, 4, 52), Color = Palette.darken(Palette.Violet, 0.2),
+		CFrame = cf * CFrame.new(0, 2, 0), Shadow = true }, stage)
+	Build.neon({ Name = "StageGlow", Size = Vector3.new(54, 0.6, 54), Color = Palette.Magenta,
+		CFrame = cf * CFrame.new(0, 4.3, 0), Transparency = 0.4, CanCollide = false }, stage)
+	Build.ring(LOBBY.EventStage + Vector3.new(0, 6, 0), 24, 10, Vector3.new(3, 8, 3), Palette.Violet, stage)
+	Build.sign(cf * CFrame.new(0, 18, -24), "EVENTOS DEL <b>LOBBY</b>", {
+		Width = 34, Height = 8, Color = Palette.Ink, Accent = Palette.Magenta, Name = "EventSign",
+	}, stage)
+end
+
+-- ─────────────────────────── ANCLAS ─────────────────────────────────────────
+local function computeAnchors()
+	-- Tiendas: 3 a cada lado, mirando al centro
+	local slotZ = { -70, 0, 70 }
+	for _, shop in ipairs(Config.Shops) do
+		local sideX = (shop.Side == "left") and -LOBBY.ShopX or LOBBY.ShopX
+		local pos = ORIGIN + Vector3.new(sideX, 0, slotZ[shop.Slot] or 0)
+		local look = Vector3.new(ORIGIN.X, 0, pos.Z)
+		LobbyBuilder.Anchors.Shops[shop.Id] = CFrame.lookAt(pos, look)
+	end
+
+	-- Huevos: arco de pedestales
+	for i = 1, #Config.Eggs do
+		local t = (i - (#Config.Eggs + 1) / 2)
+		local pos = LOBBY.EggZone + Vector3.new(t * 26, 0, 0)
+		LobbyBuilder.Anchors.Eggs[i] = CFrame.lookAt(pos, pos + Vector3.new(0, 0, 1))
+	end
+
+	-- Tableros Top 100: tres gigantes al norte
+	local xs = { -118, 0, 118 }
+	for i = 1, 3 do
+		local pos = ORIGIN + Vector3.new(xs[i], 0, LOBBY.BoardsZ)
+		LobbyBuilder.Anchors.Boards[i] = CFrame.lookAt(pos, pos + Vector3.new(0, 0, 1))
+	end
+end
+
+-- ─────────────────────────── BUILD ──────────────────────────────────────────
+function LobbyBuilder.Build(): Model
+	-- Limpieza de cualquier baseplate/lobby anterior
+	for _, name in ipairs({ "Baseplate", "Lobby", "SpawnLocation" }) do
+		local old = Workspace:FindFirstChild(name)
+		if old then old:Destroy() end
+	end
+
+	LobbyBuilder.SetupLighting()
+
+	local lobby = Build.model("Lobby", Workspace)
+	computeAnchors()
+
+	buildFloor(lobby)
+	buildWalls(lobby)
+	buildPlaza(lobby)
+	buildPaths(lobby)
+	local spawns = buildSpawnZone(lobby)
+	buildLamps(lobby)
+	buildEventStage(lobby)
+
+	-- Bosque procedural de árboles Stud de colores
+	TreeGenerator.forest(lobby, {
+		Count = Config.Performance.MaxLobbyTrees,
+		Center = ORIGIN,
+		RangeX = LOBBY.FloorSize.X / 2 + 80,
+		RangeZ = LOBBY.FloorSize.Z / 2 + 80,
+		Seed = 77213,
+		Y = 0,
+		Avoid = {
+			{ Pos = ORIGIN, Radius = 92 },
+			{ Pos = ORIGIN + Vector3.new(0, 0, LOBBY.SpawnZ), Radius = 70 },
+			{ Pos = ORIGIN + Vector3.new(0, 0, LOBBY.BoardsZ), Radius = 120 },
+			{ Pos = LOBBY.EggZone, Radius = 60 },
+			{ Pos = LOBBY.EventStage, Radius = 55 },
+			{ Pos = ORIGIN + Vector3.new(LOBBY.ShopX, 0, 0), Radius = 110 },
+			{ Pos = ORIGIN + Vector3.new(-LOBBY.ShopX, 0, 0), Radius = 110 },
+		},
+	})
+
+	SpawnService.SetLobbySpawns(spawns)
+	SpawnService.DisableSpawnForceFields(lobby)
+
+	print(("[LobbyBuilder] lobby construido (%d instancias)"):format(#lobby:GetDescendants()))
+	return lobby
+end
+
+return LobbyBuilder
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX26">
+      <Properties>
+        <string name="Name">LobbyEventService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	LobbyEventService.lua
+	Ubicación en Roblox: ServerScriptService > Server > LobbyEventService   (ModuleScript)
+
+	Eventos dinámicos del lobby con temporizador, anuncio visual y efectos
+	ambientales:
+	  · LLUVIA DE MONEDAS  → studs dorados que caen y se recogen al tocarlos
+	  · FIESTA DE HUEVOS   → huevos al 50%
+	  · TORMENTA STUD      → rayos decorativos (reutiliza el VFX de aparición)
+	  · FIESTA NEÓN        → el cliente tiñe la iluminación al ritmo
+]]
+
+local Debris = game:GetService("Debris")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Palette = require(Shared.Palette)
+local Build = require(Shared.Build)
+local Net = require(Shared.Net)
+
+local DataService = require(script.Parent.DataService)
+
+local LobbyEventService = {}
+
+LobbyEventService.Active = nil :: any
+LobbyEventService.EndsAt = 0
+
+local coinFolder: Folder? = nil
+
+function LobbyEventService.GetEggDiscount(): number
+	if LobbyEventService.Active and LobbyEventService.Active.Id == "eggfest" then
+		return 0.5
+	end
+	return 1
+end
+
+function LobbyEventService.IsActive(id: string): boolean
+	return LobbyEventService.Active ~= nil and LobbyEventService.Active.Id == id
+end
+
+-- ─────────────────────── EFECTOS ───────────────────────────────────────────
+local function spawnCoin(position: Vector3)
+	if not coinFolder or not coinFolder.Parent then return end
+	local coin = Build.neon({
+		Name = "StudCoin", Size = Vector3.new(3, 3, 3), Color = Palette.Gold,
+		Position = position, Anchored = false, CanCollide = true,
+		Tags = { "StudSpin" },
+	}, coinFolder)
+	coin.CustomPhysicalProperties = PhysicalProperties.new(0.2, 0.3, 0.2, 1, 1)
+
+	local taken = false
+	coin.Touched:Connect(function(hit)
+		if taken then return end
+		local character = hit:FindFirstAncestorOfClass("Model")
+		local player = character and Players:GetPlayerFromCharacter(character)
+		if not player then return end
+		taken = true
+		DataService.Update(player, function(d) d.Coins += 15 end)
+		Net.Event("Toast"):FireClient(player, { Text = "+15 ◉", Kind = "coin" })
+		coin:Destroy()
+	end)
+
+	Debris:AddItem(coin, 14)
+end
+
+local function runCoinRain(duration: number)
+	coinFolder = Build.folder("EventCoins", Workspace)
+	local t0 = os.clock()
+	while os.clock() - t0 < duration and LobbyEventService.Active do
+		for _ = 1, 4 do
+			spawnCoin(Config.Lobby.Origin + Vector3.new(
+				math.random(-180, 180), 90, math.random(-120, 120)))
+		end
+		task.wait(1.2)
+	end
+	if coinFolder then
+		Debris:AddItem(coinFolder, 16)
+		coinFolder = nil
+	end
+end
+
+local function runStorm(duration: number)
+	local t0 = os.clock()
+	while os.clock() - t0 < duration and LobbyEventService.Active do
+		local pos = Config.Lobby.Origin + Vector3.new(math.random(-170, 170), 0, math.random(-110, 110))
+		Net.Event("SpawnVFX"):FireAllClients({
+			Position = pos,
+			Character = nil,
+			UserId = 0,
+			Color = Palette.Cyan,
+			Context = "storm",
+		})
+		task.wait(math.random(10, 22) / 10)
+	end
+end
+
+-- ─────────────────────── CICLO ──────────────────────────────────────────────
+local function startEvent(event)
+	LobbyEventService.Active = event
+	LobbyEventService.EndsAt = os.clock() + Config.LobbyEvents.Duration
+
+	Net.Event("LobbyEvent"):FireAllClients({
+		Phase = "start", Id = event.Id, Name = event.Name, Desc = event.Desc,
+		Color = event.Color, Ambient = event.Ambient, Duration = Config.LobbyEvents.Duration,
+	})
+	Net.Event("Announce"):FireAllClients({
+		Text = "✦ " .. event.Name, Subtitle = event.Desc, Color = event.Color,
+	})
+
+	if event.Id == "coinrain" then
+		task.spawn(runCoinRain, Config.LobbyEvents.Duration)
+	elseif event.Id == "storm" then
+		task.spawn(runStorm, Config.LobbyEvents.Duration)
+	end
+
+	task.delay(Config.LobbyEvents.Duration, function()
+		if LobbyEventService.Active == event then
+			LobbyEventService.Active = nil
+			Net.Event("LobbyEvent"):FireAllClients({ Phase = "end", Id = event.Id })
+		end
+	end)
+end
+
+function LobbyEventService.ForceEvent(id: string)
+	for _, e in ipairs(Config.LobbyEvents.List) do
+		if e.Id == id then
+			startEvent(e)
+			return true
+		end
+	end
+	return false
+end
+
+function LobbyEventService.Init()
+	task.spawn(function()
+		task.wait(45) -- primer evento al poco de abrir el servidor
+		while true do
+			local list = Config.LobbyEvents.List
+			startEvent(list[math.random(1, #list)])
+			task.wait(Config.LobbyEvents.Interval)
+		end
+	end)
+	print("[LobbyEventService] listo")
+end
+
+return LobbyEventService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX27">
+      <Properties>
+        <string name="Name">MapService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	MapService.lua
+	Ubicación en Roblox: ServerScriptService > Server > MapService   (ModuleScript)
+
+	Construcción y destrucción de los mapas procedurales:
+	  · Genera el mapa elegido en Workspace/ActiveMap (lejos del lobby)
+	  · Conecta las zonas de daño (tag StudHazard) y trampolines (StudBouncy)
+	  · Tweenea la iluminación hacia la temática del mapa y la devuelve al salir
+	  · Destruye TODO al terminar (partes, conexiones y tags) para no perder FPS
+]]
+
+local CollectionService = game:GetService("CollectionService")
+local Lighting = game:GetService("Lighting")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local MapKit = require(Shared.Maps.MapKit)
+local CombatService = require(script.Parent.CombatService)
+
+local MapService = {}
+
+MapService.Current = nil :: any
+local connections: { RBXScriptConnection } = {}
+local lobbyLighting: { [string]: any } = {}
+local lobbyAtmosphere: { [string]: any } = {}
+
+-- ─────────────────────────── ILUMINACIÓN ────────────────────────────────────
+local LIGHT_PROPS = { "Ambient", "OutdoorAmbient", "Brightness", "FogColor", "FogEnd", "ClockTime" }
+local ATMO_PROPS = { "Color", "Density", "Haze", "Glare", "Offset" }
+
+function MapService.SnapshotLobbyLighting()
+	for _, p in ipairs(LIGHT_PROPS) do
+		lobbyLighting[p] = (Lighting :: any)[p]
+	end
+	local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+	if atmo then
+		for _, p in ipairs(ATMO_PROPS) do
+			lobbyAtmosphere[p] = (atmo :: any)[p]
+		end
+	end
+end
+
+local function tweenLighting(target: { [string]: any }, duration: number)
+	local info = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local props = {}
+	for _, p in ipairs(LIGHT_PROPS) do
+		if target[p] ~= nil then props[p] = target[p] end
+	end
+	if next(props) then
+		TweenService:Create(Lighting, info, props):Play()
+	end
+
+	local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+	if atmo then
+		local aProps = {}
+		if target.AtmosphereColor then aProps.Color = target.AtmosphereColor end
+		if target.AtmosphereDensity then aProps.Density = target.AtmosphereDensity end
+		if target.AtmosphereHaze then aProps.Haze = target.AtmosphereHaze end
+		if next(aProps) then
+			TweenService:Create(atmo, info, aProps):Play()
+		end
+	end
+end
+
+function MapService.RestoreLobbyLighting(duration: number?)
+	local target = {}
+	for k, v in pairs(lobbyLighting) do target[k] = v end
+	target.AtmosphereColor = lobbyAtmosphere.Color
+	target.AtmosphereDensity = lobbyAtmosphere.Density
+	target.AtmosphereHaze = lobbyAtmosphere.Haze
+	tweenLighting(target, duration or 1.5)
+end
+
+-- ─────────────────────────── HAZARDS / TRAMPOLINES ──────────────────────────
+local function characterOf(part: BasePart): (Model?, Humanoid?, Player?)
+	local model = part:FindFirstAncestorOfClass("Model")
+	if not model then return nil, nil, nil end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return nil, nil, nil end
+	return model, humanoid, Players:GetPlayerFromCharacter(model)
+end
+
+local function connectHazards(root: Model)
+	local lastHit: { [Model]: number } = {}
+
+	for _, part in ipairs(CollectionService:GetTagged(MapKit.TAG_HAZARD)) do
+		if part:IsDescendantOf(root) and part:IsA("BasePart") then
+			local damage = part:GetAttribute("Damage") or 10
+			local interval = part:GetAttribute("Interval") or 0.35
+			table.insert(connections, part.Touched:Connect(function(hit)
+				local model, humanoid = characterOf(hit)
+				if not model or not humanoid or humanoid.Health <= 0 then return end
+				local now = os.clock()
+				if (lastHit[model] or 0) + interval > now then return end
+				lastHit[model] = now
+				CombatService.ApplyDamage(model, damage, nil)
+			end))
+		end
+	end
+
+	for _, part in ipairs(CollectionService:GetTagged(MapKit.TAG_BOUNCY)) do
+		if part:IsDescendantOf(root) and part:IsA("BasePart") then
+			local power = part:GetAttribute("Power") or 110
+			local cooldown: { [Model]: number } = {}
+			table.insert(connections, part.Touched:Connect(function(hit)
+				local model, humanoid = characterOf(hit)
+				if not model or not humanoid then return end
+				local now = os.clock()
+				if (cooldown[model] or 0) + 0.4 > now then return end
+				cooldown[model] = now
+				local hrp = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+				if hrp then
+					hrp.AssemblyLinearVelocity = Vector3.new(
+						hrp.AssemblyLinearVelocity.X, power, hrp.AssemblyLinearVelocity.Z)
+				end
+			end))
+		end
+	end
+end
+
+-- ─────────────────────────── BUILD / CLEAR ──────────────────────────────────
+function MapService.Build(mapModule): (Model, { CFrame })
+	MapService.Clear()
+
+	local rng = Random.new(os.time() + math.random(1, 10000))
+	local origin = Config.Lobby.MapOrigin
+	local t0 = os.clock()
+
+	local model, spawns = mapModule.Build(origin, rng)
+	model.Name = "ActiveMap"
+	model.Parent = Workspace
+
+	connectHazards(model)
+	tweenLighting(mapModule.Lighting, 1.2)
+
+	MapService.Current = { Module = mapModule, Model = model, Spawns = spawns, Origin = origin }
+
+	if Config.Debug then
+		print(("[MapService] %s construido en %.2f s (%d partes)")
+			:format(mapModule.Name, os.clock() - t0, #model:GetDescendants()))
+	end
+	return model, spawns
+end
+
+function MapService.Clear()
+	for _, c in ipairs(connections) do
+		pcall(function() c:Disconnect() end)
+	end
+	table.clear(connections)
+
+	if MapService.Current and MapService.Current.Model then
+		MapService.Current.Model:Destroy()
+	end
+	local stale = Workspace:FindFirstChild("ActiveMap")
+	if stale then stale:Destroy() end
+
+	MapService.Current = nil
+	MapService.RestoreLobbyLighting(1.2)
+end
+
+--- CFrame de spawn para el jugador número `index` (reparte sin amontonar).
+function MapService.GetSpawnCFrame(index: number): CFrame
+	local current = MapService.Current
+	if not current or #current.Spawns == 0 then
+		return CFrame.new(Config.Lobby.MapOrigin + Vector3.new(0, 20, 0))
+	end
+	local spawns = current.Spawns
+	return spawns[((index - 1) % #spawns) + 1]
+end
+
+function MapService.Init()
+	task.defer(MapService.SnapshotLobbyLighting)
+	print("[MapService] listo")
+end
+
+return MapService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX28">
+      <Properties>
+        <string name="Name">PlayerService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	PlayerService.lua
+	Ubicación en Roblox: ServerScriptService > Server > PlayerService   (ModuleScript)
+
+	Flujo de entrada del jugador y tiempo jugado:
+	  · GetBootInfo  → el cliente pregunta si el mundo ya está construido
+	  · ClientReady  → la pantalla de carga terminó: cargamos el personaje
+	  · Acumulación de "Playtime" en segundos (base del Top 100 de horas)
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local DataService = require(script.Parent.DataService)
+
+local PlayerService = {}
+
+PlayerService.WorldReady = false
+local readyPlayers: { [Player]: boolean } = {}
+
+function PlayerService.SetWorldReady(value: boolean)
+	PlayerService.WorldReady = value
+	-- Si alguien entró mientras se construía el lobby, se le avisa.
+	for _, player in ipairs(Players:GetPlayers()) do
+		pcall(function()
+			Net.Event("Toast"):FireClient(player, { Text = "Mundo listo", Kind = "info" })
+		end)
+	end
+end
+
+local function spawnPlayer(player: Player)
+	if readyPlayers[player] then return end
+	readyPlayers[player] = true
+	if not player.Character then
+		player:LoadCharacter()
+	end
+end
+
+function PlayerService.Init()
+	Net.Func("GetBootInfo").OnServerInvoke = function(player)
+		local data = DataService.IsLoaded(player) and DataService.Get(player) or nil
+		return {
+			WorldReady = PlayerService.WorldReady,
+			GameName = Config.GameName,
+			Tagline = Config.Tagline,
+			DataReady = data ~= nil,
+			Coins = data and data.Coins or 0,
+			Kills = data and data.Kills or 0,
+		}
+	end
+
+	Net.Event("ClientReady").OnServerEvent:Connect(function(player)
+		-- Seguridad: solo se atiende una vez por jugador.
+		if readyPlayers[player] then return end
+		task.spawn(function()
+			-- esperamos a que el mundo esté construido (máx 30 s)
+			local t0 = os.clock()
+			while not PlayerService.WorldReady and os.clock() - t0 < 30 do
+				task.wait(0.2)
+			end
+			DataService.Get(player)
+			spawnPlayer(player)
+		end)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		readyPlayers[player] = nil
+	end)
+
+	-- Red de seguridad: si un cliente nunca manda ClientReady (error de red),
+	-- lo spawneamos igualmente a los 25 s.
+	Players.PlayerAdded:Connect(function(player)
+		task.delay(25, function()
+			if player.Parent and not readyPlayers[player] then
+				spawnPlayer(player)
+			end
+		end)
+	end)
+
+	-- Acumulador de tiempo jugado
+	task.spawn(function()
+		while true do
+			task.wait(Config.Data.PlaytimeTick)
+			for _, player in ipairs(Players:GetPlayers()) do
+				if DataService.IsLoaded(player) then
+					DataService.Update(player, function(d)
+						d.Playtime += Config.Data.PlaytimeTick
+					end)
+				end
+			end
+		end
+	end)
+
+	print("[PlayerService] listo")
+end
+
+return PlayerService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX29">
+      <Properties>
+        <string name="Name">RoundService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	RoundService.lua
+	Ubicación en Roblox: ServerScriptService > Server > RoundService   (ModuleScript)
+
+	Ciclo completo y automático:
+	  INTERMISSION → VOTING → PREPARING (construye mapa + teletransporta con rayo)
+	  → ROUND (combate / supervivencia) → ENDING (premios) → limpieza → repetir
+
+	Todo el estado se emite por el RemoteEvent "RoundState" una vez por segundo.
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local MapRegistry = require(Shared.Maps.MapRegistry)
+
+local DataService = require(script.Parent.DataService)
+local MapService = require(script.Parent.MapService)
+local SpawnService = require(script.Parent.SpawnService)
+local CombatService = require(script.Parent.CombatService)
+
+local RoundService = {}
+
+RoundService.State = "INTERMISSION"
+RoundService.TimeLeft = 0
+RoundService.MapName = ""
+RoundService.Participants = {} :: { [Player]: boolean }
+
+local votes: { [Player]: string } = {}
+local options: { any } = {}
+local lastMapId: string? = nil
+local roundStartClock = 0
+
+-- ─────────────────────────── BROADCAST ──────────────────────────────────────
+local function snapshot()
+	local alive = 0
+	for player, isAlive in pairs(RoundService.Participants) do
+		if isAlive and player.Parent then alive += 1 end
+	end
+	return {
+		State = RoundService.State,
+		TimeLeft = math.max(0, math.floor(RoundService.TimeLeft)),
+		MapName = RoundService.MapName,
+		Alive = alive,
+		Total = #Players:GetPlayers(),
+	}
+end
+
+local function broadcast()
+	Net.Event("RoundState"):FireAllClients(snapshot())
+end
+
+function RoundService.GetSnapshot()
+	return snapshot()
+end
+
+local function setState(state: string, duration: number)
+	RoundService.State = state
+	RoundService.TimeLeft = duration
+	broadcast()
+end
+
+--- Espera `duration` segundos emitiendo el temporizador cada segundo.
+local function countdown(duration: number, onTick: ((number) -> ())?)
+	RoundService.TimeLeft = duration
+	while RoundService.TimeLeft > 0 do
+		task.wait(1)
+		RoundService.TimeLeft -= 1
+		if onTick then onTick(RoundService.TimeLeft) end
+		broadcast()
+	end
+end
+
+local function announce(text: string, color: Color3?, subtitle: string?)
+	Net.Event("Announce"):FireAllClients({
+		Text = text, Subtitle = subtitle, Color = color or Color3.fromRGB(0, 225, 255),
+	})
+end
+
+-- ─────────────────────────── VOTACIÓN ───────────────────────────────────────
+local function tally()
+	local counts = {}
+	for _, map in ipairs(options) do counts[map.Id] = 0 end
+	for _, mapId in pairs(votes) do
+		if counts[mapId] ~= nil then counts[mapId] += 1 end
+	end
+	return counts
+end
+
+local function startVoting()
+	table.clear(votes)
+	options = MapRegistry.PickOptions(Config.Round.VoteOptions, lastMapId)
+
+	local infos = {}
+	for _, map in ipairs(options) do
+		table.insert(infos, MapRegistry.GetInfo(map))
+	end
+	Net.Event("VoteOptions"):FireAllClients({ Options = infos, Duration = Config.Round.Voting })
+	Net.Event("VoteTally"):FireAllClients(tally())
+end
+
+local function resolveVote()
+	local counts = tally()
+	local bestId, bestCount = nil, -1
+	for _, map in ipairs(options) do
+		local c = counts[map.Id] or 0
+		if c > bestCount then bestId, bestCount = map.Id, c end
+	end
+	if not bestId or bestCount <= 0 then
+		-- Nadie votó: elegimos al azar entre las opciones.
+		bestId = options[math.random(1, #options)].Id
+	end
+	Net.Event("VoteOptions"):FireAllClients({ Options = {}, Duration = 0 })
+	return MapRegistry.ById[bestId]
+end
+
+-- ─────────────────────────── RONDA ──────────────────────────────────────────
+local function eligiblePlayers(): { Player }
+	local list = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character and player.Character:FindFirstChildOfClass("Humanoid") then
+			table.insert(list, player)
+		end
+	end
+	return list
+end
+
+local function sendToMap(player: Player, index: number, map)
+	local cframe = MapService.GetSpawnCFrame(index)
+	local character = player.Character
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.Health = humanoid.MaxHealth
+	end
+
+	-- Bonus comprados en la tienda
+	local data = DataService.Get(player)
+	if data and humanoid then
+		if data.Purchases["boost_speed"] then humanoid.WalkSpeed = 22 end
+		if data.Purchases["boost_jump"] then humanoid.JumpPower = 80 end
+		if data.Purchases["boost_health"] then
+			humanoid.MaxHealth = 150
+			humanoid.Health = 150
+		end
+		if data.Purchases["item_double"] then character:SetAttribute("DoubleDamage", true) end
+	end
+
+	SpawnService.PlaceCharacter(player, cframe, "map", map.Colors.Accent)
+	CombatService.GiveWeapon(player)
+end
+
+local function returnToLobby(player: Player)
+	RoundService.Participants[player] = nil
+	CombatService.RemoveWeapon(player)
+	if player.Character then
+		player.Character:SetAttribute("DoubleDamage", nil)
+	end
+	SpawnService.ToLobby(player)
+end
+
+local function countAlive(): number
+	local n = 0
+	for player, alive in pairs(RoundService.Participants) do
+		if alive and player.Parent then n += 1 end
+	end
+	return n
+end
+
+local function endRound(reason: string)
+	CombatService.Enabled = false
+
+	local survivors = {}
+	for player, alive in pairs(RoundService.Participants) do
+		if alive and player.Parent then table.insert(survivors, player) end
+	end
+
+	local winnerText = "SIN GANADOR"
+	if #survivors == 1 then
+		winnerText = survivors[1].DisplayName .. " GANA"
+		DataService.Update(survivors[1], function(d)
+			d.Wins += 1
+			d.Coins += Config.Round.RewardWin
+		end)
+	elseif #survivors > 1 then
+		winnerText = ("%d SUPERVIVIENTES"):format(#survivors)
+		for _, player in ipairs(survivors) do
+			DataService.Update(player, function(d)
+				d.Coins += math.floor(Config.Round.RewardWin / 2)
+			end)
+		end
+	end
+
+	local elapsed = math.floor(os.clock() - roundStartClock)
+	for _, player in ipairs(survivors) do
+		DataService.Update(player, function(d)
+			d.Coins += math.floor(elapsed / 10) * Config.Round.RewardSurvivePerSec
+		end)
+	end
+
+	announce(winnerText, Color3.fromRGB(255, 205, 55), reason)
+	setState("ENDING", Config.Round.PostRound)
+
+	-- Devolvemos supervivientes al lobby con la animación de rayo
+	for _, player in ipairs(survivors) do
+		task.spawn(returnToLobby, player)
+	end
+	table.clear(RoundService.Participants)
+
+	countdown(Config.Round.PostRound)
+	MapService.Clear()
+	RoundService.MapName = ""
+end
+
+-- ─────────────────────────── BUCLE PRINCIPAL ────────────────────────────────
+local function cycle()
+	while true do
+		-- 1) INTERMISIÓN
+		setState("INTERMISSION", Config.Round.Intermission)
+		announce("INTERMISIÓN", Color3.fromRGB(120, 255, 180), "Prepárate para la siguiente ronda")
+		countdown(Config.Round.Intermission)
+
+		if #Players:GetPlayers() < Config.Round.MinPlayers then
+			setState("WAITING", 5)
+			announce("ESPERANDO JUGADORES", Color3.fromRGB(255, 196, 0))
+			countdown(5)
+			continue
+		end
+
+		-- 2) VOTACIÓN
+		setState("VOTING", Config.Round.Voting)
+		startVoting()
+		countdown(Config.Round.Voting)
+		local map = resolveVote()
+		lastMapId = map.Id
+		RoundService.MapName = map.Name
+
+		-- 3) PREPARACIÓN: construir + teletransportar
+		setState("PREPARING", Config.Round.Preparing)
+		announce(map.Name, map.Colors.Accent, map.Theme)
+		MapService.Build(map)
+		task.wait(0.6)
+
+		table.clear(RoundService.Participants)
+		local list = eligiblePlayers()
+		for i, player in ipairs(list) do
+			RoundService.Participants[player] = true
+			task.spawn(sendToMap, player, i, map)
+		end
+		countdown(Config.Round.Preparing)
+
+		-- 4) RONDA
+		CombatService.Enabled = true
+		roundStartClock = os.clock()
+		setState("ROUND", Config.Round.Duration)
+		announce("¡A LUCHAR!", map.Colors.Secondary, map.Name)
+
+		local finished = false
+		countdown(Config.Round.Duration, function()
+			if not finished and countAlive() <= (Config.Round.MinPlayers > 1 and 1 or 0) then
+				finished = true
+				RoundService.TimeLeft = 0
+			end
+		end)
+
+		-- 5) FIN DE RONDA + LIMPIEZA
+		endRound(finished and "Último en pie" or "Tiempo agotado")
+	end
+end
+
+-- ─────────────────────────── INIT ───────────────────────────────────────────
+function RoundService.Init()
+	Net.Event("CastVote").OnServerEvent:Connect(function(player, mapId)
+		if RoundService.State ~= "VOTING" then return end
+		if typeof(mapId) ~= "string" then return end
+		local valid = false
+		for _, map in ipairs(options) do
+			if map.Id == mapId then valid = true break end
+		end
+		if not valid then return end
+		votes[player] = mapId
+		Net.Event("VoteTally"):FireAllClients(tally())
+	end)
+
+	-- Muerte en ronda → vuelta al lobby con rayo + impacto
+	CombatService.PlayerDied.Event:Connect(function(victim: Player)
+		if not RoundService.Participants[victim] then return end
+		RoundService.Participants[victim] = nil
+		task.delay(1.6, function()
+			if not victim.Parent then return end
+			CombatService.RemoveWeapon(victim)
+			victim:LoadCharacter() -- reaparece y SpawnService dispara el VFX
+			task.wait(0.2)
+			SpawnService.ToLobby(victim)
+		end)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		RoundService.Participants[player] = nil
+		votes[player] = nil
+	end)
+
+	-- Reenvía el estado a quien acaba de entrar
+	Players.PlayerAdded:Connect(function(player)
+		task.delay(2, function()
+			if player.Parent then
+				Net.Event("RoundState"):FireClient(player, snapshot())
+			end
+		end)
+	end)
+
+	task.spawn(cycle)
+	print("[RoundService] listo")
+end
+
+return RoundService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX30">
+      <Properties>
+        <string name="Name">ShopService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	ShopService.lua
+	Ubicación en Roblox: ServerScriptService > Server > ShopService   (ModuleScript)
+
+	Tiendas temáticas a los lados del lobby: mostrador, letrero, luces propias,
+	estantería con los artículos en 3D y ProximityPrompt.
+	La compra se valida SIEMPRE en el servidor (RemoteFunction "Purchase").
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Palette = require(Shared.Palette)
+local Build = require(Shared.Build)
+local Net = require(Shared.Net)
+
+local DataService = require(script.Parent.DataService)
+local LobbyBuilder = require(script.Parent.LobbyBuilder)
+
+local ShopService = {}
+
+local itemIndex: { [string]: { Item: any, Shop: any } } = {}
+for _, shop in ipairs(Config.Shops) do
+	for _, item in ipairs(shop.Items) do
+		itemIndex[item.Id] = { Item = item, Shop = shop }
+	end
+end
+
+-- ─────────────────────── CONSTRUCCIÓN DEL PUESTO ────────────────────────────
+local function buildStand(shop, cf: CFrame, parent: Instance)
+	local model = Build.model("Shop_" .. shop.Id, parent)
+	local color = shop.Color
+
+	-- Plataforma
+	Build.part({ Name = "Platform", Size = Vector3.new(46, 3, 34), Color = Palette.White,
+		CFrame = cf * CFrame.new(0, 1.5, 0), Shadow = true }, model)
+	Build.neon({ Name = "PlatformEdge", Size = Vector3.new(48, 0.6, 36), Color = color,
+		CFrame = cf * CFrame.new(0, 3.2, 0), Transparency = 0.4, CanCollide = false }, model)
+
+	-- Mostrador
+	Build.part({ Name = "Counter", Size = Vector3.new(30, 7, 6), Color = Palette.darken(color, 0.25),
+		CFrame = cf * CFrame.new(0, 6.5, 9) }, model)
+	Build.part({ Name = "CounterTop", Size = Vector3.new(32, 1.2, 8), Color = Palette.White,
+		CFrame = cf * CFrame.new(0, 10.6, 9) }, model)
+
+	-- Paredes y techo
+	for _, side in ipairs({ -1, 1 }) do
+		Build.part({ Name = "Wall", Size = Vector3.new(2, 20, 30), Color = Palette.darken(color, 0.1),
+			CFrame = cf * CFrame.new(side * 22, 13, -1) }, model)
+	end
+	Build.part({ Name = "BackWall", Size = Vector3.new(46, 20, 2), Color = Palette.darken(color, 0.3),
+		CFrame = cf * CFrame.new(0, 13, -15) }, model)
+	Build.part({ Name = "Roof", Size = Vector3.new(50, 2, 36), Color = color,
+		CFrame = cf * CFrame.new(0, 24, -1), Shadow = true }, model)
+	for i = -2, 2 do
+		Build.part({ Name = "RoofStripe", Size = Vector3.new(8, 1, 38), Color = (i % 2 == 0) and Palette.White or color,
+			CFrame = cf * CFrame.new(i * 9, 25.4, -1), CanCollide = false }, model)
+	end
+
+	-- Letrero
+	Build.sign(cf * CFrame.new(0, 30, 2), ("%s <b>%s</b>"):format(shop.Icon, shop.Name), {
+		Width = 40, Height = 9, Color = Palette.Ink, Accent = color, Name = "ShopSign",
+	}, model)
+
+	-- Luces propias
+	for _, side in ipairs({ -1, 1 }) do
+		local bulb = Build.neon({ Name = "ShopLight", Size = Vector3.new(2.6, 2.6, 2.6), Color = color,
+			CanCollide = false, CFrame = cf * CFrame.new(side * 18, 22, 8) }, model)
+		Build.light(bulb, color, 30, 3)
+	end
+
+	-- Artículos expuestos en la estantería
+	for i, item in ipairs(shop.Items) do
+		local x = (i - (#shop.Items + 1) / 2) * 11
+		local pedestal = Build.part({ Name = "Pedestal", Size = Vector3.new(7, 6, 7),
+			Color = Palette.darken(color, 0.35), CFrame = cf * CFrame.new(x, 6, -8) }, model)
+		local display = Build.neon({
+			Name = "ItemDisplay", Size = Vector3.new(4, 4, 4), Color = Palette.lighten(color, 0.25),
+			CFrame = cf * CFrame.new(x, 12, -8) * CFrame.Angles(0.4, 0.6, 0), CanCollide = false,
+			Tags = { "StudSpin" },
+		}, model)
+		Build.billboard(display, ("<b>%s</b>\n<font size=\"14\">%d ◉</font>"):format(item.Name, item.Price), {
+			Name = "ItemTag", Size = UDim2.new(0, 180, 0, 54), StudsOffset = Vector3.new(0, 3, 0),
+			MaxDistance = 70, TextColor = Palette.White,
+		})
+		pedestal:SetAttribute("ItemId", item.Id)
+	end
+
+	-- Interacción
+	local counterTop = model:FindFirstChild("CounterTop") :: BasePart
+	local prompt = Build.prompt(counterTop, "Abrir tienda", shop.Name, 16)
+	prompt:SetAttribute("ShopId", shop.Id)
+	prompt.Name = "ShopPrompt"
+
+	return model
+end
+
+function ShopService.Build(parent: Instance?)
+	local folder = Build.folder("Shops", parent or workspace:FindFirstChild("Lobby") or workspace)
+	for _, shop in ipairs(Config.Shops) do
+		local cf = LobbyBuilder.Anchors.Shops[shop.Id]
+		if cf then buildStand(shop, cf, folder) end
+	end
+	print(("[ShopService] %d tiendas construidas"):format(#Config.Shops))
+	return folder
+end
+
+-- ─────────────────────── COMPRA (SERVIDOR) ──────────────────────────────────
+local function applyPurchase(player, data, item)
+	data.Purchases[item.Id] = true
+
+	if item.Id == "boost_health" then
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.MaxHealth = 150
+			humanoid.Health = 150
+		end
+	elseif item.Id == "coin_daily" then
+		data.Coins += 200
+	end
+end
+
+function ShopService.Init()
+	Net.Func("Purchase").OnServerInvoke = function(player, itemId)
+		if typeof(itemId) ~= "string" then
+			return { ok = false, message = "Petición inválida" }
+		end
+		local entry = itemIndex[itemId]
+		if not entry then
+			return { ok = false, message = "El artículo no existe" }
+		end
+
+		local data = DataService.Get(player)
+		if not data then
+			return { ok = false, message = "Tus datos aún se están cargando" }
+		end
+		if data.Purchases[itemId] then
+			return { ok = false, message = "Ya tienes este artículo" }
+		end
+		if data.Coins < entry.Item.Price then
+			return { ok = false, message = ("Te faltan %d monedas"):format(entry.Item.Price - data.Coins) }
+		end
+
+		DataService.Update(player, function(d)
+			d.Coins -= entry.Item.Price
+			applyPurchase(player, d, entry.Item)
+		end)
+
+		return {
+			ok = true,
+			message = ("¡%s comprado!"):format(entry.Item.Name),
+			coins = DataService.Get(player).Coins,
+			itemId = itemId,
+		}
+	end
+
+	print("[ShopService] listo")
+end
+
+return ShopService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX31">
+      <Properties>
+        <string name="Name">SpawnService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	SpawnService.lua
+	Ubicación en Roblox: ServerScriptService > Server > SpawnService   (ModuleScript)
+
+	· Mata el ForceField clásico de Roblox (Duration = 0 + destrucción de residuos)
+	· Invulnerabilidad temporal gestionada por código (sin esfera azul)
+	· Dispara el RemoteEvent SpawnVFX (rayo + impacto) en cada aparición
+	· Teletransporte a mapa / vuelta al lobby con la misma animación
+	· Carga del personaje solo cuando el cliente terminó la pantalla de carga
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+
+local SpawnService = {}
+
+local lobbySpawns: { CFrame } = {}
+local characterConns: { [Player]: { RBXScriptConnection } } = {}
+
+SpawnService.CharacterSpawned = Instance.new("BindableEvent") -- (player, character, context)
+
+-- ─────────────────────── FORCEFIELD CLÁSICO: FUERA ──────────────────────────
+local function purgeForceFields(character: Model)
+	for _, d in ipairs(character:GetDescendants()) do
+		if d:IsA("ForceField") then d:Destroy() end
+	end
+	local conn
+	conn = character.DescendantAdded:Connect(function(d)
+		if d:IsA("ForceField") then
+			d:Destroy()
+		end
+	end)
+	task.delay(10, function()
+		if conn then conn:Disconnect() end
+	end)
+end
+
+function SpawnService.DisableSpawnForceFields(root: Instance?)
+	local target = root or Workspace
+	for _, d in ipairs(target:GetDescendants()) do
+		if d:IsA("SpawnLocation") then
+			d.Duration = 0        -- ← sin ForceField azul
+			d.Neutral = true
+		elseif d:IsA("ForceField") then
+			d:Destroy()
+		end
+	end
+end
+
+-- ─────────────────────── INVULNERABILIDAD PROPIA ────────────────────────────
+function SpawnService.GrantInvulnerability(character: Model, seconds: number?)
+	local duration = seconds or Config.Combat.Invulnerability
+	character:SetAttribute("InvulnerableUntil", os.clock() + duration)
+end
+
+function SpawnService.IsInvulnerable(character: Model?): boolean
+	if not character then return false end
+	local until_ = character:GetAttribute("InvulnerableUntil")
+	return typeof(until_) == "number" and os.clock() < until_
+end
+
+-- ─────────────────────── SPAWNS DEL LOBBY ───────────────────────────────────
+function SpawnService.SetLobbySpawns(cframes: { CFrame })
+	lobbySpawns = cframes
+end
+
+function SpawnService.RandomLobbyCFrame(): CFrame
+	if #lobbySpawns == 0 then
+		return CFrame.new(Config.Lobby.Origin + Vector3.new(0, 6, Config.Lobby.SpawnZ))
+	end
+	return lobbySpawns[math.random(1, #lobbySpawns)]
+end
+
+-- ─────────────────────── VFX: RAYO + IMPACTO ────────────────────────────────
+--- Avisa a todos los clientes; cada cliente decide por distancia si lo dibuja.
+function SpawnService.PlaySpawnVFX(character: Model, color: Color3?, context: string?)
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not root then return end
+	local player = Players:GetPlayerFromCharacter(character)
+
+	Net.Event("SpawnVFX"):FireAllClients({
+		Position = root.Position - Vector3.new(0, 3, 0),
+		Character = character,
+		UserId = player and player.UserId or 0,
+		Color = color or Color3.fromRGB(0, 230, 255),
+		Context = context or "lobby",
+	})
+end
+
+--- Congela brevemente al jugador mientras se materializa (sin anclar el HRP).
+local function freezeForMaterialization(character: Model)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+	local ws, jp = humanoid.WalkSpeed, humanoid.JumpPower
+	humanoid.WalkSpeed = 0
+	humanoid.JumpPower = 0
+	humanoid.AutoRotate = false
+	local total = Config.SpawnVFX.AnticipationT + Config.SpawnVFX.StrikeT + 0.06
+	task.delay(total, function()
+		if humanoid.Parent then
+			humanoid.WalkSpeed = (ws > 0) and ws or 16
+			humanoid.JumpPower = (jp > 0) and jp or 50
+			humanoid.AutoRotate = true
+		end
+	end)
+end
+
+-- ─────────────────────── APARICIÓN / TELETRANSPORTE ─────────────────────────
+--- Coloca el personaje en una CFrame y reproduce la animación completa.
+function SpawnService.PlaceCharacter(player: Player, cframe: CFrame, context: string?, color: Color3?)
+	local character = player.Character
+	if not character or not character.PrimaryPart then return false end
+
+	character:PivotTo(cframe + Vector3.new(0, 3.5, 0))
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if root then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end
+
+	SpawnService.GrantInvulnerability(character)
+	freezeForMaterialization(character)
+	SpawnService.PlaySpawnVFX(character, color, context)
+	SpawnService.CharacterSpawned:Fire(player, character, context or "teleport")
+	return true
+end
+
+function SpawnService.ToLobby(player: Player, color: Color3?)
+	local character = player.Character
+	if not character then
+		player.RespawnLocation = nil
+		player:LoadCharacter()
+		return
+	end
+	SpawnService.PlaceCharacter(player, SpawnService.RandomLobbyCFrame(), "lobby", color)
+end
+
+-- ─────────────────────── CICLO DE PERSONAJE ─────────────────────────────────
+local function onCharacterAdded(player: Player, character: Model)
+	purgeForceFields(character)
+
+	local humanoid = character:WaitForChild("Humanoid", 8) :: Humanoid?
+	if humanoid then
+		humanoid.BreakJointsOnDeath = false
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
+		humanoid.NameDisplayDistance = 60
+		humanoid.HealthDisplayDistance = 50
+	end
+
+	character:WaitForChild("HumanoidRootPart", 8)
+	task.wait(0.05)
+
+	SpawnService.GrantInvulnerability(character)
+	freezeForMaterialization(character)
+	SpawnService.PlaySpawnVFX(character, nil, "spawn")
+	SpawnService.CharacterSpawned:Fire(player, character, "spawn")
+end
+
+function SpawnService.Init()
+	-- El personaje NO se carga solo: esperamos a que la pantalla de carga acabe.
+	Players.CharacterAutoLoads = false
+	SpawnService.DisableSpawnForceFields()
+
+	Workspace.DescendantAdded:Connect(function(d)
+		if d:IsA("ForceField") then
+			-- Cualquier ForceField residual (del motor o de un plugin) muere aquí.
+			task.defer(function()
+				if d.Parent then d:Destroy() end
+			end)
+		elseif d:IsA("SpawnLocation") then
+			d.Duration = 0
+		end
+	end)
+
+	local function hook(player: Player)
+		characterConns[player] = characterConns[player] or {}
+		table.insert(characterConns[player], player.CharacterAdded:Connect(function(character)
+			task.spawn(onCharacterAdded, player, character)
+		end))
+	end
+
+	Players.PlayerAdded:Connect(hook)
+	for _, p in ipairs(Players:GetPlayers()) do hook(p) end
+
+	Players.PlayerRemoving:Connect(function(player)
+		for _, c in ipairs(characterConns[player] or {}) do c:Disconnect() end
+		characterConns[player] = nil
+	end)
+
+	print("[SpawnService] listo (ForceField clásico desactivado)")
+end
+
+return SpawnService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX32">
+      <Properties>
+        <string name="Name">TitleService</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	TitleService.lua
+	Ubicación en Roblox: ServerScriptService > Server > TitleService   (ModuleScript)
+
+	Títulos 3D exclusivos del Top 1 / 2 / 3 (Kills, Racha, Horas jugadas).
+
+	BillboardGui configurado EXACTAMENTE como pide el brief:
+	  · Encima de la cabeza, justo arriba del nombre  → StudsOffset
+	  · MaxDistance = 30 studs
+	  · Size en OFFSET fijo (UDim2.new(0, 220, 0, 55)) para que no cambie de
+	    tamaño al acercar/alejar la cámara. El cliente (TitleController)
+	    compensa además el escalado por distancia del motor.
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Palette = require(Shared.Palette)
+local Titles = require(Shared.Titles)
+
+local LeaderboardService = require(script.Parent.LeaderboardService)
+
+local TitleService = {}
+
+local TITLE_NAME = "StudLegendTitle"
+
+local function clearTitle(character: Model)
+	local head = character:FindFirstChild("Head")
+	if not head then return end
+	local old = head:FindFirstChild(TITLE_NAME)
+	if old then old:Destroy() end
+end
+
+local function createTitle(character: Model, def, categoryId: string, rank: number)
+	local head = character:FindFirstChild("Head") :: BasePart?
+	if not head then return end
+	clearTitle(character)
+
+	local bb = Instance.new("BillboardGui")
+	bb.Name = TITLE_NAME
+	bb.Adornee = head
+	bb.Size = Config.Titles.BillboardSize            -- tamaño FIJO en offset
+	bb.StudsOffset = Config.Titles.StudsOffset       -- justo encima del nombre
+	bb.ExtentsOffsetWorldSpace = Vector3.new(0, 0.2, 0)
+	bb.AlwaysOnTop = false
+	bb.MaxDistance = Config.Titles.MaxDistance       -- 30 studs
+	bb.LightInfluence = 0
+	bb.ResetOnSpawn = false
+	bb:SetAttribute("FixedScreenSize", Config.Titles.ConstantScreenSize)
+	bb:SetAttribute("BaseWidth", Config.Titles.BillboardSize.X.Offset)
+	bb:SetAttribute("BaseHeight", Config.Titles.BillboardSize.Y.Offset)
+	bb.Parent = head
+
+	-- Fondo tipo placa
+	local plate = Instance.new("Frame")
+	plate.Name = "Plate"
+	plate.Size = UDim2.fromScale(1, 1)
+	plate.BackgroundColor3 = Color3.fromRGB(16, 18, 30)
+	plate.BackgroundTransparency = 0.25
+	plate.BorderSizePixel = 0
+	plate.Parent = bb
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 12)
+	corner.Parent = plate
+
+	local plateGrad = Instance.new("UIGradient")
+	plateGrad.Color = ColorSequence.new(Palette.darken(def.A, 0.55), Palette.darken(def.B, 0.55))
+	plateGrad.Rotation = 20
+	plateGrad.Parent = plate
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 2.5
+	stroke.Color = def.Stroke
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = plate
+
+	-- Texto con gradiente
+	local label = Instance.new("TextLabel")
+	label.Name = "TitleText"
+	label.Size = UDim2.new(1, -10, 1, -14)
+	label.Position = UDim2.new(0, 5, 0, 3)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.FredokaOne
+	label.Text = def.Text
+	label.TextScaled = true
+	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.RichText = true
+	label.Parent = plate
+
+	local textGrad = Instance.new("UIGradient")
+	textGrad.Name = "TextGradient"
+	textGrad.Color = ColorSequence.new(def.A, def.B)
+	textGrad.Rotation = 0
+	textGrad.Parent = label
+
+	local textStroke = Instance.new("UIStroke")
+	textStroke.Thickness = 2
+	textStroke.Color = def.Stroke
+	textStroke.Parent = label
+
+	-- Subtítulo con la categoría y el puesto
+	local sub = Instance.new("TextLabel")
+	sub.Name = "Sub"
+	sub.Size = UDim2.new(1, 0, 0, 14)
+	sub.Position = UDim2.new(0, 0, 1, -14)
+	sub.BackgroundTransparency = 1
+	sub.Font = Enum.Font.GothamBold
+	sub.Text = ("#%d · %s"):format(rank, Titles.CategoryNames[categoryId] or categoryId)
+	sub.TextColor3 = Palette.rankColor(rank)
+	sub.TextSize = 12
+	sub.Parent = plate
+
+	if def.Glow then
+		bb:SetAttribute("Glow", true)
+	end
+end
+
+--- Aplica (o quita) el título del jugador según el caché de leaderboards.
+function TitleService.Apply(player: Player)
+	local character = player.Character
+	if not character then return end
+
+	local ranks = LeaderboardService.GetRanks(player.UserId)
+	local def, categoryId, rank = Titles.Best(ranks)
+
+	if def and categoryId and rank then
+		createTitle(character, def, categoryId, rank)
+	else
+		clearTitle(character)
+	end
+end
+
+function TitleService.ApplyAll()
+	for _, player in ipairs(Players:GetPlayers()) do
+		task.spawn(TitleService.Apply, player)
+	end
+end
+
+function TitleService.Init()
+	LeaderboardService.Updated.Event:Connect(function()
+		task.defer(TitleService.ApplyAll)
+	end)
+
+	local function hook(player: Player)
+		player.CharacterAppearanceLoaded:Connect(function()
+			task.wait(0.4)
+			TitleService.Apply(player)
+		end)
+		if player.Character then
+			task.spawn(TitleService.Apply, player)
+		end
+	end
+
+	Players.PlayerAdded:Connect(hook)
+	for _, p in ipairs(Players:GetPlayers()) do hook(p) end
+
+	print("[TitleService] listo")
+end
+
+return TitleService
+]]></ProtectedString>
+      </Properties>
+    </Item>
+
+  </Item>
+  <Item class="Script" referent="RBX33">
+    <Properties>
+      <string name="Name">Bootstrap</string>
+      <ProtectedString name="Source"><![CDATA[--[[
+	Bootstrap.server.lua
+	Ubicación en Roblox: ServerScriptService > Bootstrap   (Script, RunContext = Legacy)
+
+	Punto de entrada ÚNICO del servidor.
+	Arranca los servicios en orden de dependencia y marca el mundo como listo
+	para que las pantallas de carga de los clientes terminen y spawneen.
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+
+local Server = ServerScriptService:WaitForChild("Server")
+
+local t0 = os.clock()
+print(("═══ %s v%s · arrancando servidor ═══"):format(Config.GameName, Config.Version))
+
+-- 0) Ajustes globales de mundo / rendimiento
+Workspace.FallenPartsDestroyHeight = -500
+pcall(function()
+	Workspace.StreamingEnabled = Config.Performance.StreamingEnabled
+	Workspace.StreamingTargetRadius = 1024
+	Workspace.StreamingIntegrityMode = Enum.StreamingIntegrityMode.Disabled
+end)
+pcall(function()
+	-- Sonidos limpios y sin ocupar un canal por nada
+	local ss = game:GetService("SoundService")
+	ss.RespectFilteringEnabled = true
+end)
+
+-- 1) Red
+Net.Init()
+
+-- 2) Servicios base
+local DataService        = require(Server.DataService)
+local LeaderboardService = require(Server.LeaderboardService)
+local SpawnService       = require(Server.SpawnService)
+local CombatService      = require(Server.CombatService)
+local PlayerService      = require(Server.PlayerService)
+
+DataService.Init()
+SpawnService.Init()
+CombatService.Init()
+
+-- 3) Mundo (el orden importa: LobbyBuilder calcula las anclas)
+local LobbyBuilder       = require(Server.LobbyBuilder)
+local BoardBuilder       = require(Server.BoardBuilder)
+local ShopService        = require(Server.ShopService)
+local EggService         = require(Server.EggService)
+local LobbyEventService  = require(Server.LobbyEventService)
+
+local lobby = LobbyBuilder.Build()
+BoardBuilder.Build(lobby)
+ShopService.Build(lobby)
+EggService.Build(lobby)
+
+ShopService.Init()
+EggService.Init()
+LobbyEventService.Init()
+
+-- 4) Rondas y mapas
+local MapService   = require(Server.MapService)
+local RoundService = require(Server.RoundService)
+
+MapService.Init()
+RoundService.Init()
+
+-- 5) Rankings, títulos y anuncios
+local TitleService    = require(Server.TitleService)
+local AnnounceService = require(Server.AnnounceService)
+
+LeaderboardService.Init()
+TitleService.Init()
+AnnounceService.Init()
+
+-- 6) Jugadores (último: ahora sí se pueden cargar personajes)
+PlayerService.Init()
+PlayerService.SetWorldReady(true)
+
+print(("═══ %s listo en %.2f s ═══"):format(Config.GameName, os.clock() - t0))
+]]></ProtectedString>
+      <token name="RunContext">0</token>
+    </Properties>
+  </Item>
+</roblox>

@@ -1,0 +1,2243 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="Folder" referent="RBX1">
+    <Properties>
+      <string name="Name">Shared</string>
+    </Properties>
+    <Item class="Folder" referent="RBX2">
+      <Properties>
+        <string name="Name">Maps</string>
+      </Properties>
+      <Item class="ModuleScript" referent="RBX3">
+        <Properties>
+          <string name="Name">ArcticTemple</string>
+          <ProtectedString name="Source"><![CDATA[--[[
+	ArcticTemple.lua — MAPA 2
+	Ubicación en Roblox: ReplicatedStorage > Shared > Maps > ArcticTemple   (ModuleScript)
+
+	Tema: Templo Ártico / Hielo Cristalino Stud.
+	Suelo resbaladizo, templo central de 3 niveles, cristales gigantes,
+	grietas de agua helada y puentes de hielo estrechos.
+]]
+
+local Build = require(script.Parent.Parent.Build)
+local Palette = require(script.Parent.Parent.Palette)
+local MapKit = require(script.Parent.MapKit)
+
+local Map = {}
+
+Map.Id = "arctic"
+Map.Name = "TEMPLO ÁRTICO"
+Map.Theme = "Hielo Cristalino Stud"
+Map.Description = "Hielo resbaladizo, cristales turquesa y caídas al agua helada."
+Map.Colors = {
+	Primary = Color3.fromRGB(214, 240, 255),
+	Secondary = Color3.fromRGB(86, 196, 255),
+	Accent = Color3.fromRGB(0, 236, 226),
+}
+Map.Lighting = {
+	ClockTime = 9.5, Brightness = 2.8,
+	Ambient = Color3.fromRGB(120, 150, 170), OutdoorAmbient = Color3.fromRGB(150, 180, 200),
+	FogColor = Color3.fromRGB(200, 228, 245), FogEnd = 1100,
+	AtmosphereColor = Color3.fromRGB(205, 232, 255), AtmosphereDensity = 0.36,
+	AtmosphereHaze = 1.6, AtmosphereTint = Color3.fromRGB(225, 245, 255),
+}
+
+local ICE_PHYSICS = PhysicalProperties.new(0.7, 0.08, 0.2, 1, 1) -- fricción muy baja
+
+function Map.Build(origin: Vector3, rng: Random): (Model, { CFrame })
+	local model = Build.model("Map_" .. Map.Id)
+	local ice = Map.Colors.Primary
+	local deep = Map.Colors.Secondary
+	local crystal = Map.Colors.Accent
+
+	-- Plataforma helada principal (resbaladiza)
+	local floor = Build.part({
+		Name = "IceField", Size = Vector3.new(320, 8, 320), Color = ice,
+		Position = origin + Vector3.new(0, 4, 0), Shadow = true,
+	}, model)
+	floor.CustomPhysicalProperties = ICE_PHYSICS
+
+	-- Agua helada perimetral (daño por congelación)
+	MapKit.hazard(model, CFrame.new(origin + Vector3.new(0, 1, 0)), Vector3.new(560, 4, 560), deep, 16, {
+		Name = "FrozenWater", Transparency = 0.35, CanCollide = true, Material = Enum.Material.Glass, Interval = 0.4,
+	})
+
+	-- Grietas en el hielo (agujeros letales)
+	for i = 1, 8 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(55, 140)
+		MapKit.hazard(model, CFrame.new(origin + Vector3.new(math.cos(ang) * r, 8.3, math.sin(ang) * r)) * CFrame.Angles(0, ang, 0),
+			Vector3.new(rng:NextNumber(14, 30), 0.6, rng:NextNumber(8, 16)), deep, 14,
+			{ Name = "Crack", Transparency = 0.25, Interval = 0.5 })
+	end
+
+	-- Templo central de 3 niveles con columnas
+	local levels = 3
+	for lv = 1, levels do
+		local w = 120 - (lv - 1) * 34
+		local y = 8 + (lv - 1) * 16
+		Build.part({
+			Name = "TempleFloor", Size = Vector3.new(w, 4, w),
+			Color = Palette.vary(ice, 0.01, 0.03, 0.04, rng),
+			Position = origin + Vector3.new(0, y + 2, 0), Shadow = lv == 1,
+		}, model)
+		local cols = 8
+		for i = 1, cols do
+			local ang = (i / cols) * math.pi * 2
+			local r = w / 2 - 7
+			MapKit.pillar(model, origin + Vector3.new(math.cos(ang) * r, y + 4, math.sin(ang) * r), 14, 4,
+				Palette.darken(ice, 0.12), crystal)
+		end
+		-- escalinata de acceso
+		MapKit.stairs(model, CFrame.new(origin + Vector3.new(0, y, w / 2 + 2)), 8, Vector3.new(16, 2, 2.6), Palette.darken(ice, 0.06))
+	end
+
+	-- Altar y cristal maestro
+	local topY = 8 + levels * 16
+	Build.part({ Name = "Altar", Size = Vector3.new(22, 3, 22), Color = Palette.darken(ice, 0.2),
+		Position = origin + Vector3.new(0, topY + 1.5, 0) }, model)
+	local master = Build.neon({ Name = "MasterCrystal", Size = Vector3.new(8, 26, 8), Color = crystal,
+		Transparency = 0.25, CanCollide = false,
+		CFrame = CFrame.new(origin + Vector3.new(0, topY + 16, 0)) * CFrame.Angles(0, math.rad(45), 0) }, model)
+	Build.light(master, crystal, 55, 4)
+
+	-- Cristales gigantes repartidos
+	for i = 1, 16 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(70, 150)
+		local h = rng:NextNumber(14, 34)
+		local pos = origin + Vector3.new(math.cos(ang) * r, 8 + h / 2, math.sin(ang) * r)
+		local c = Palette.vary(crystal, 0.05, 0.1, 0.12, rng)
+		Build.part({
+			Name = "Crystal", Size = Vector3.new(rng:NextNumber(4, 9), h, rng:NextNumber(4, 9)),
+			Color = c, Material = Enum.Material.Glass, Transparency = 0.35, Stud = false,
+			CFrame = CFrame.new(pos) * CFrame.Angles(rng:NextNumber(-0.18, 0.18), rng:NextNumber(0, 6), rng:NextNumber(-0.18, 0.18)),
+		}, model)
+		if i % 4 == 0 then
+			local tip = Build.neon({ Name = "CrystalTip", Size = Vector3.new(3, 4, 3), Color = c, CanCollide = false,
+				Position = pos + Vector3.new(0, h / 2 + 2, 0) }, model)
+			Build.light(tip, c, 24, 2)
+		end
+	end
+
+	-- Puentes de hielo flotantes entre islotes
+	for i = 1, 4 do
+		local ang = (i / 4) * math.pi * 2 + math.pi / 4
+		local dir = Vector3.new(math.cos(ang), 0, math.sin(ang))
+		local islandPos = origin + dir * 135 + Vector3.new(0, 20, 0)
+		MapKit.island(model, islandPos, 22, 4, ice, deep)
+		for s = 1, 6 do
+			local p = Build.part({
+				Name = "IceBridge", Size = Vector3.new(8, 1.2, 10), Color = Palette.lighten(ice, 0.05),
+				Transparency = 0.1,
+				CFrame = CFrame.new(origin + dir * (62 + s * 11) + Vector3.new(0, 11 + s * 1.6, 0)) * CFrame.Angles(0, -ang, 0),
+			}, model)
+			p.CustomPhysicalProperties = ICE_PHYSICS
+		end
+	end
+
+	MapKit.totem(model, CFrame.new(origin + Vector3.new(0, 8, 130)), "TEMPLO ÁRTICO", crystal)
+	MapKit.voidPlane(model, origin, 900, -40)
+
+	local spawns = MapKit.spawnRing(origin, 118, 12, 12)
+	return model, spawns
+end
+
+return Map
+]]></ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="RBX4">
+        <Properties>
+          <string name="Name">CyberCity</string>
+          <ProtectedString name="Source"><![CDATA[--[[
+	CyberCity.lua — MAPA 5
+	Ubicación en Roblox: ReplicatedStorage > Shared > Maps > CyberCity   (ModuleScript)
+
+	Tema: Ciudad Futurista / Cibernética Stud.
+	Rejilla neón, torres con ventanas iluminadas, pasarelas elevadas,
+	muros láser que hacen daño y plataformas de salto (jump pads).
+]]
+
+local Build = require(script.Parent.Parent.Build)
+local Palette = require(script.Parent.Parent.Palette)
+local MapKit = require(script.Parent.MapKit)
+
+local Map = {}
+
+Map.Id = "cyber"
+Map.Name = "CIUDAD FUTURISTA"
+Map.Theme = "Cibernética Stud"
+Map.Description = "Rascacielos neón, pasarelas altas y muros láser en movimiento."
+Map.Colors = {
+	Primary = Color3.fromRGB(32, 36, 64),
+	Secondary = Color3.fromRGB(255, 52, 190),
+	Accent = Color3.fromRGB(0, 238, 255),
+}
+Map.Lighting = {
+	ClockTime = 0.4, Brightness = 1.2,
+	Ambient = Color3.fromRGB(40, 44, 80), OutdoorAmbient = Color3.fromRGB(54, 58, 104),
+	FogColor = Color3.fromRGB(24, 20, 56), FogEnd = 640,
+	AtmosphereColor = Color3.fromRGB(60, 56, 130), AtmosphereDensity = 0.46,
+	AtmosphereHaze = 3.0, AtmosphereTint = Color3.fromRGB(150, 120, 255),
+}
+
+function Map.Build(origin: Vector3, rng: Random): (Model, { CFrame })
+	local model = Build.model("Map_" .. Map.Id)
+	local dark = Map.Colors.Primary
+	local pink = Map.Colors.Secondary
+	local cyan = Map.Colors.Accent
+
+	-- Plaza base + rejilla neón
+	Build.part({ Name = "Ground", Size = Vector3.new(320, 8, 320), Color = dark,
+		Position = origin + Vector3.new(0, 4, 0), Shadow = true }, model)
+	for i = -7, 7 do
+		Build.neon({ Name = "GridX", Size = Vector3.new(320, 0.3, 1), Color = (i % 2 == 0) and cyan or pink,
+			Transparency = 0.45, CanCollide = false, Position = origin + Vector3.new(0, 8.2, i * 22) }, model)
+		Build.neon({ Name = "GridZ", Size = Vector3.new(1, 0.3, 320), Color = (i % 2 == 0) and pink or cyan,
+			Transparency = 0.45, CanCollide = false, Position = origin + Vector3.new(i * 22, 8.2, 0) }, model)
+	end
+
+	-- Torres con ventanas neón
+	local towerSpots = {
+		Vector3.new(-96, 0, -96), Vector3.new(96, 0, -96), Vector3.new(-96, 0, 96), Vector3.new(96, 0, 96),
+		Vector3.new(0, 0, -124), Vector3.new(0, 0, 124), Vector3.new(-128, 0, 0), Vector3.new(128, 0, 0),
+	}
+	for idx, spot in ipairs(towerSpots) do
+		local h = rng:NextNumber(46, 96)
+		local w = rng:NextNumber(24, 36)
+		local base = origin + spot
+		Build.part({ Name = "Tower", Size = Vector3.new(w, h, w), Color = Palette.vary(dark, 0.02, 0.06, 0.07, rng),
+			Position = base + Vector3.new(0, 8 + h / 2, 0), Shadow = true }, model)
+		-- ventanas
+		local rows = math.floor(h / 10)
+		for r = 1, rows do
+			for _, face in ipairs({ Vector3.new(0, 0, 1), Vector3.new(0, 0, -1), Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0) }) do
+				if rng:NextNumber() < 0.65 then
+					local color = (rng:NextNumber() < 0.5) and cyan or pink
+					local size = (face.X ~= 0) and Vector3.new(0.4, 3.4, w * 0.5) or Vector3.new(w * 0.5, 3.4, 0.4)
+					Build.neon({
+						Name = "Window", Size = size, Color = color, Transparency = 0.25, CanCollide = false,
+						Position = base + Vector3.new(0, 8 + r * 10, 0) + face * (w / 2 + 0.1),
+					}, model)
+				end
+			end
+		end
+		-- azotea accesible
+		Build.part({ Name = "Roof", Size = Vector3.new(w + 6, 2, w + 6), Color = Palette.darken(dark, 0.08),
+			Position = base + Vector3.new(0, 8 + h + 1, 0) }, model)
+		local beacon = Build.neon({ Name = "Beacon", Size = Vector3.new(3, 6, 3), Color = (idx % 2 == 0) and pink or cyan,
+			CanCollide = false, Position = base + Vector3.new(0, 8 + h + 5, 0) }, model)
+		Build.light(beacon, beacon.Color, 40, 3)
+	end
+
+	-- Pasarelas elevadas que conectan torres
+	for i = 1, #towerSpots do
+		local a = origin + towerSpots[i]
+		local b = origin + towerSpots[(i % #towerSpots) + 1]
+		local mid = (a + b) / 2
+		local dir = (b - a)
+		local len = dir.Magnitude
+		Build.part({
+			Name = "Skywalk", Size = Vector3.new(9, 1.4, len * 0.78), Color = Palette.darken(dark, 0.05),
+			CFrame = CFrame.lookAt(mid + Vector3.new(0, 48, 0), b + Vector3.new(0, 48, 0)),
+		}, model)
+		Build.neon({
+			Name = "SkywalkEdge", Size = Vector3.new(10, 0.3, len * 0.78), Color = cyan, Transparency = 0.35, CanCollide = false,
+			CFrame = CFrame.lookAt(mid + Vector3.new(0, 48.9, 0), b + Vector3.new(0, 48.9, 0)),
+		}, model)
+	end
+
+	-- Plataforma central elevada (zona caliente)
+	Build.part({ Name = "Hub", Size = Vector3.new(58, 3, 58), Color = Palette.darken(dark, 0.1),
+		Position = origin + Vector3.new(0, 30, 0), Shadow = true }, model)
+	Build.ring(origin + Vector3.new(0, 32.5, 0), 27, 16, Vector3.new(3, 3, 3), pink, model)
+	for _, s in ipairs({ -1, 1 }) do
+		MapKit.ramp(model, CFrame.new(origin + Vector3.new(s * 40, 19, 0)) * CFrame.Angles(0, math.rad(s * 90), 0),
+			Vector3.new(14, 22, 30), Palette.darken(dark, 0.04))
+	end
+
+	-- Jump pads
+	for i = 1, 6 do
+		local ang = (i / 6) * math.pi * 2
+		MapKit.bouncy(model, CFrame.new(origin + Vector3.new(math.cos(ang) * 62, 8.6, math.sin(ang) * 62)),
+			Vector3.new(12, 1.2, 12), cyan, 150)
+	end
+
+	-- Muros láser (daño alto, pasillos peligrosos)
+	for i = 1, 5 do
+		local x = (i - 3) * 40
+		MapKit.hazard(model, CFrame.new(origin + Vector3.new(x, 16, 0)), Vector3.new(2, 16, 46), pink, 26,
+			{ Name = "LaserWall", Transparency = 0.45, Interval = 0.3 })
+	end
+
+	-- Hologramas publicitarios
+	for i = 1, 4 do
+		local ang = (i / 4) * math.pi * 2 + math.pi / 4
+		local pos = origin + Vector3.new(math.cos(ang) * 110, 36, math.sin(ang) * 110)
+		Build.sign(CFrame.lookAt(pos, Vector3.new(origin.X, pos.Y, origin.Z)),
+			(i % 2 == 0) and "<b>STUD</b> CORP" or "NEO <b>BLOX</b>",
+			{ Width = 30, Height = 10, Color = dark, Accent = (i % 2 == 0) and cyan or pink }, model)
+	end
+
+	MapKit.totem(model, CFrame.new(origin + Vector3.new(0, 8, 132)), "CIUDAD FUTURISTA", cyan)
+	MapKit.voidPlane(model, origin, 900, -40)
+
+	local spawns = MapKit.spawnRing(origin, 104, 12, 14)
+	return model, spawns
+end
+
+return Map
+]]></ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="RBX5">
+        <Properties>
+          <string name="Name">DesertRuins</string>
+          <ProtectedString name="Source"><![CDATA[--[[
+	DesertRuins.lua — MAPA 4
+	Ubicación en Roblox: ReplicatedStorage > Shared > Maps > DesertRuins   (ModuleScript)
+
+	Tema: Ruinas del Desierto / Pirámides Stud.
+	Tres pirámides escalonadas (una escalable hasta la cima), obeliscos,
+	columnas rotas, arenas movedizas y un oasis central.
+]]
+
+local Build = require(script.Parent.Parent.Build)
+local Palette = require(script.Parent.Parent.Palette)
+local MapKit = require(script.Parent.MapKit)
+
+local Map = {}
+
+Map.Id = "desert"
+Map.Name = "RUINAS DEL DESIERTO"
+Map.Theme = "Pirámides Stud"
+Map.Description = "Pirámides escalables, obeliscos dorados y arenas movedizas."
+Map.Colors = {
+	Primary = Color3.fromRGB(240, 206, 126),
+	Secondary = Color3.fromRGB(196, 150, 84),
+	Accent = Color3.fromRGB(255, 196, 40),
+}
+Map.Lighting = {
+	ClockTime = 15.0, Brightness = 3.0,
+	Ambient = Color3.fromRGB(130, 112, 80), OutdoorAmbient = Color3.fromRGB(170, 146, 102),
+	FogColor = Color3.fromRGB(236, 206, 150), FogEnd = 1000,
+	AtmosphereColor = Color3.fromRGB(238, 212, 160), AtmosphereDensity = 0.40,
+	AtmosphereHaze = 2.2, AtmosphereTint = Color3.fromRGB(255, 232, 190),
+}
+
+local function pyramid(parent: Instance, base: Vector3, size: number, steps: number, color: Color3, accent: Color3, rng: Random)
+	for i = 1, steps do
+		local w = size * (1 - (i - 1) / steps)
+		Build.part({
+			Name = "PyramidStep", Size = Vector3.new(w, 7, w),
+			Color = Palette.vary(color, 0.01, 0.04, 0.05, rng),
+			Position = base + Vector3.new(0, (i - 0.5) * 7, 0),
+			Shadow = i <= 2,
+		}, parent)
+	end
+	local topY = steps * 7
+	local cap = Build.neon({
+		Name = "Capstone", Size = Vector3.new(8, 8, 8), Color = accent, CanCollide = true,
+		CFrame = CFrame.new(base + Vector3.new(0, topY + 4, 0)) * CFrame.Angles(0, math.rad(45), 0),
+	}, parent)
+	Build.light(cap, accent, 40, 3)
+end
+
+function Map.Build(origin: Vector3, rng: Random): (Model, { CFrame })
+	local model = Build.model("Map_" .. Map.Id)
+	local sand = Map.Colors.Primary
+	local stone = Map.Colors.Secondary
+	local gold = Map.Colors.Accent
+
+	-- Desierto
+	Build.part({ Name = "Sand", Size = Vector3.new(360, 8, 360), Color = sand,
+		Position = origin + Vector3.new(0, 4, 0), Shadow = true }, model)
+
+	-- Dunas (cuñas grandes, muy barato)
+	for i = 1, 10 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(90, 165)
+		local s = rng:NextNumber(22, 46)
+		Build.wedge({
+			Name = "Dune", Size = Vector3.new(s, s * 0.42, s * 1.5),
+			Color = Palette.vary(sand, 0.01, 0.05, 0.06, rng),
+			CFrame = CFrame.new(origin + Vector3.new(math.cos(ang) * r, 8 + s * 0.21, math.sin(ang) * r))
+				* CFrame.Angles(0, rng:NextNumber(0, math.pi * 2), 0),
+		}, model)
+	end
+
+	-- Pirámide mayor (escalable) + dos menores
+	pyramid(model, origin + Vector3.new(0, 8, -55), 104, 9, stone, gold, rng)
+	pyramid(model, origin + Vector3.new(-98, 8, 68), 62, 6, stone, gold, rng)
+	pyramid(model, origin + Vector3.new(98, 8, 68), 62, 6, stone, gold, rng)
+
+	-- Oasis central con plataforma
+	Build.neon({ Name = "Oasis", Size = Vector3.new(40, 1, 40), Color = Color3.fromRGB(60, 220, 230),
+		Transparency = 0.4, Shape = Enum.PartType.Cylinder, CanCollide = true,
+		CFrame = CFrame.new(origin + Vector3.new(0, 8.4, 60)) * CFrame.Angles(0, 0, math.rad(90)) }, model)
+	MapKit.pillar(model, origin + Vector3.new(0, 9, 60), 18, 5, stone, gold)
+
+	-- Obeliscos
+	for i = 1, 6 do
+		local ang = (i / 6) * math.pi * 2
+		local r = 84
+		local pos = origin + Vector3.new(math.cos(ang) * r, 8, math.sin(ang) * r)
+		Build.part({ Name = "Obelisk", Size = Vector3.new(7, 34, 7), Color = stone,
+			CFrame = CFrame.new(pos + Vector3.new(0, 17, 0)) * CFrame.Angles(0, ang, 0), Shadow = true }, model)
+		Build.neon({ Name = "ObeliskTip", Size = Vector3.new(5, 6, 5), Color = gold, CanCollide = false,
+			CFrame = CFrame.new(pos + Vector3.new(0, 37, 0)) * CFrame.Angles(0, ang, math.rad(45)) }, model)
+	end
+
+	-- Columnas rotas (cobertura)
+	for i = 1, 16 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(40, 150)
+		local h = rng:NextNumber(6, 22)
+		Build.cylinder({
+			Name = "Column", Size = Vector3.new(h, 7, 7), Color = Palette.vary(stone, 0.01, 0.04, 0.07, rng),
+			CFrame = CFrame.new(origin + Vector3.new(math.cos(ang) * r, 8 + h / 2, math.sin(ang) * r))
+				* CFrame.Angles(0, rng:NextNumber(0, 6), math.rad(90)),
+		}, model)
+	end
+
+	-- Muros de ruinas que forman pasillos
+	for i = 1, 8 do
+		local ang = (i / 8) * math.pi * 2 + math.pi / 10
+		local r = 122
+		local pos = origin + Vector3.new(math.cos(ang) * r, 8, math.sin(ang) * r)
+		Build.part({ Name = "RuinWall", Size = Vector3.new(34, rng:NextNumber(10, 20), 4),
+			Color = Palette.darken(stone, 0.07),
+			CFrame = CFrame.new(pos + Vector3.new(0, 8, 0)) * CFrame.Angles(0, -ang, 0) }, model)
+	end
+
+	-- Arenas movedizas (daño lento)
+	for i = 1, 6 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(50, 140)
+		MapKit.hazard(model, CFrame.new(origin + Vector3.new(math.cos(ang) * r, 8.2, math.sin(ang) * r)),
+			Vector3.new(rng:NextNumber(16, 28), 0.6, rng:NextNumber(16, 28)), Palette.darken(sand, 0.3), 9,
+			{ Name = "Quicksand", Transparency = 0.1, Material = Enum.Material.SmoothPlastic, Interval = 0.6 })
+	end
+
+	MapKit.totem(model, CFrame.new(origin + Vector3.new(0, 8, 140)), "RUINAS DEL DESIERTO", gold)
+	MapKit.voidPlane(model, origin, 900, -40)
+
+	local spawns = MapKit.spawnRing(origin, 126, 12, 12)
+	return model, spawns
+end
+
+return Map
+]]></ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="RBX6">
+        <Properties>
+          <string name="Name">EnchantedForest</string>
+          <ProtectedString name="Source"><![CDATA[--[[
+	EnchantedForest.lua — MAPA 3
+	Ubicación en Roblox: ReplicatedStorage > Shared > Maps > EnchantedForest   (ModuleScript)
+
+	Tema: Bosque Encantado / Setas Neón Stud.
+	Setas gigantes que rebotan, árboles procedurales violeta/magenta,
+	laguna brillante, troncos caídos y plataformas de copa a 3 alturas.
+]]
+
+local Build = require(script.Parent.Parent.Build)
+local Palette = require(script.Parent.Parent.Palette)
+local TreeGenerator = require(script.Parent.Parent.TreeGenerator)
+local MapKit = require(script.Parent.MapKit)
+
+local Map = {}
+
+Map.Id = "forest"
+Map.Name = "BOSQUE ENCANTADO"
+Map.Theme = "Setas Neón Stud"
+Map.Description = "Setas que te lanzan por los aires y niebla mágica violeta."
+Map.Colors = {
+	Primary = Color3.fromRGB(64, 182, 108),
+	Secondary = Color3.fromRGB(186, 92, 255),
+	Accent = Color3.fromRGB(150, 255, 80),
+}
+Map.Lighting = {
+	ClockTime = 20.2, Brightness = 1.6,
+	Ambient = Color3.fromRGB(70, 56, 96), OutdoorAmbient = Color3.fromRGB(90, 70, 120),
+	FogColor = Color3.fromRGB(70, 40, 110), FogEnd = 700,
+	AtmosphereColor = Color3.fromRGB(120, 80, 170), AtmosphereDensity = 0.48,
+	AtmosphereHaze = 2.8, AtmosphereTint = Color3.fromRGB(190, 150, 255),
+}
+
+local function mushroom(parent: Instance, pos: Vector3, scale: number, color: Color3, rng: Random)
+	local stemH = 12 * scale
+	Build.part({
+		Name = "Stem", Size = Vector3.new(4 * scale, stemH, 4 * scale),
+		Color = Color3.fromRGB(238, 230, 210), Position = pos + Vector3.new(0, stemH / 2, 0), Shadow = true,
+	}, parent)
+
+	local capR = 13 * scale
+	MapKit.bouncy(parent, CFrame.new(pos + Vector3.new(0, stemH + 2.4 * scale, 0)),
+		Vector3.new(capR, 5 * scale, capR), color, 90 + 30 * scale)
+
+	-- lunares neón
+	for i = 1, 5 do
+		local ang = (i / 5) * math.pi * 2 + rng:NextNumber(0, 1)
+		Build.neon({
+			Name = "Dot", Size = Vector3.new(2.4 * scale, 0.6, 2.4 * scale), CanCollide = false,
+			Color = Palette.lighten(color, 0.35),
+			Position = pos + Vector3.new(math.cos(ang) * capR * 0.3, stemH + 5 * scale, math.sin(ang) * capR * 0.3),
+		}, parent)
+	end
+	local glow = parent:FindFirstChild("Dot")
+	if glow and glow:IsA("BasePart") then Build.light(glow, color, 26, 2) end
+end
+
+function Map.Build(origin: Vector3, rng: Random): (Model, { CFrame })
+	local model = Build.model("Map_" .. Map.Id)
+	local grass = Map.Colors.Primary
+	local magic = Map.Colors.Secondary
+	local neon = Map.Colors.Accent
+
+	-- Suelo del claro + anillo de hierba oscura
+	Build.part({ Name = "Clearing", Size = Vector3.new(300, 8, 300), Color = grass,
+		Position = origin + Vector3.new(0, 4, 0), Shadow = true }, model)
+	Build.part({ Name = "Outer", Size = Vector3.new(340, 6, 340), Color = Palette.darken(grass, 0.16),
+		Position = origin + Vector3.new(0, 1, 0) }, model)
+
+	-- Laguna encantada central (brilla y empuja hacia arriba, no mata)
+	Build.neon({ Name = "Pond", Size = Vector3.new(54, 1.2, 54), Color = magic, Transparency = 0.35,
+		CanCollide = true, Shape = Enum.PartType.Cylinder,
+		CFrame = CFrame.new(origin + Vector3.new(0, 8.4, 0)) * CFrame.Angles(0, 0, math.rad(90)) }, model)
+	local pondLight = Build.neon({ Name = "PondCore", Size = Vector3.new(10, 10, 10), Color = magic,
+		Transparency = 0.5, CanCollide = false, Shape = Enum.PartType.Ball,
+		Position = origin + Vector3.new(0, 12, 0) }, model)
+	Build.light(pondLight, magic, 60, 5)
+
+	-- Setas rebotadoras
+	for i = 1, 12 do
+		local ang = (i / 12) * math.pi * 2 + rng:NextNumber(-0.25, 0.25)
+		local r = rng:NextNumber(42, 128)
+		local pos = origin + Vector3.new(math.cos(ang) * r, 8, math.sin(ang) * r)
+		local color = Palette.pick({ magic, neon, Palette.Magenta, Palette.Turquoise, Palette.Orange }, rng)
+		mushroom(model, pos, rng:NextNumber(0.8, 1.7), color, rng)
+	end
+
+	-- Plataformas de copa (3 alturas) sostenidas por troncos
+	for i = 1, 8 do
+		local ang = (i / 8) * math.pi * 2 + math.pi / 8
+		local r = rng:NextNumber(55, 115)
+		local h = 26 + (i % 3) * 16
+		local pos = origin + Vector3.new(math.cos(ang) * r, 0, math.sin(ang) * r)
+		Build.part({ Name = "TreeTrunk", Size = Vector3.new(7, h, 7), Color = Color3.fromRGB(104, 72, 60),
+			Position = pos + Vector3.new(0, h / 2 + 8, 0), Shadow = true }, model)
+		Build.part({ Name = "CanopyDeck", Size = Vector3.new(26, 2.4, 26),
+			Color = Palette.vary(neon, 0.06, 0.1, 0.12, rng),
+			CFrame = CFrame.new(pos + Vector3.new(0, h + 9, 0)) * CFrame.Angles(0, ang, 0) }, model)
+		Build.neon({ Name = "DeckEdge", Size = Vector3.new(27, 0.4, 27), Color = magic, CanCollide = false,
+			Transparency = 0.3, Position = pos + Vector3.new(0, h + 10.4, 0) }, model)
+	end
+
+	-- Troncos caídos como cobertura
+	for i = 1, 7 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(30, 130)
+		local len = rng:NextNumber(18, 34)
+		Build.part({
+			Name = "FallenLog", Size = Vector3.new(len, 6, 6), Color = Color3.fromRGB(96, 66, 56),
+			CFrame = CFrame.new(origin + Vector3.new(math.cos(ang) * r, 11, math.sin(ang) * r))
+				* CFrame.Angles(0, rng:NextNumber(0, math.pi), 0),
+		}, model)
+	end
+
+	-- Árboles procedurales del generador compartido (misma estética que el lobby)
+	for i = 1, 16 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(118, 158)
+		TreeGenerator.create(
+			origin + Vector3.new(math.cos(ang) * r, 8, math.sin(ang) * r),
+			model,
+			{ Seed = rng:NextInteger(1, 1e8), Color = Palette.pick({ magic, neon, Palette.Violet, Palette.Turquoise }, rng), Glow = true }
+		)
+	end
+
+	-- Espinas venenosas en los bordes
+	for i = 1, 10 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(135, 150)
+		MapKit.hazard(model, CFrame.new(origin + Vector3.new(math.cos(ang) * r, 10, math.sin(ang) * r)),
+			Vector3.new(10, 5, 10), Color3.fromRGB(120, 255, 120), 12,
+			{ Name = "Thorns", Transparency = 0.2, CanCollide = false, Interval = 0.6 })
+	end
+
+	MapKit.totem(model, CFrame.new(origin + Vector3.new(0, 8, 125)), "BOSQUE ENCANTADO", neon)
+	MapKit.voidPlane(model, origin, 900, -40)
+
+	local spawns = MapKit.spawnRing(origin, 100, 12, 14)
+	return model, spawns
+end
+
+return Map
+]]></ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="RBX7">
+        <Properties>
+          <string name="Name">MapKit</string>
+          <ProtectedString name="Source"><![CDATA[--[[
+	MapKit.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Maps > MapKit   (ModuleScript)
+
+	Piezas reutilizables para los generadores de mapas: plataformas, pilares,
+	rampas, zonas de daño (tag "StudHazard"), trampolines (tag "StudBouncy"),
+	islas flotantes y anillos de spawn.
+]]
+
+local Build = require(script.Parent.Parent.Build)
+local Palette = require(script.Parent.Parent.Palette)
+
+local MapKit = {}
+
+MapKit.TAG_HAZARD = "StudHazard"
+MapKit.TAG_BOUNCY = "StudBouncy"
+MapKit.TAG_SPIN   = "StudSpin"
+
+--- Plataforma Stud básica.
+function MapKit.platform(parent: Instance, cf: CFrame, size: Vector3, color: Color3, opts: { [string]: any }?): BasePart
+	local o = (opts or {}) :: any
+	return Build.part({
+		Name = o.Name or "Platform",
+		Size = size, Color = color, CFrame = cf,
+		Material = o.Material, Transparency = o.Transparency,
+		Shadow = o.Shadow, Stud = o.Stud,
+	}, parent)
+end
+
+--- Pilar con remate neón.
+function MapKit.pillar(parent: Instance, base: Vector3, height: number, thickness: number, color: Color3, accent: Color3)
+	Build.part({
+		Name = "Pillar", Size = Vector3.new(thickness, height, thickness), Color = color,
+		Position = base + Vector3.new(0, height / 2, 0), Shadow = true,
+	}, parent)
+	Build.neon({
+		Name = "PillarTip", Size = Vector3.new(thickness * 0.7, 1.2, thickness * 0.7), Color = accent,
+		Position = base + Vector3.new(0, height + 0.6, 0), CanCollide = false,
+	}, parent)
+end
+
+--- Zona que hace daño (lava, hielo roto, arenas, láser...).
+function MapKit.hazard(parent: Instance, cf: CFrame, size: Vector3, color: Color3, damage: number, opts: { [string]: any }?): BasePart
+	local o = (opts or {}) :: any
+	local part = Build.part({
+		Name = o.Name or "Hazard",
+		Size = size, Color = color, CFrame = cf,
+		Material = o.Material or Enum.Material.Neon,
+		Transparency = o.Transparency or 0.15,
+		CanCollide = o.CanCollide == true,
+		Stud = false,
+		Attributes = { Damage = damage, Interval = o.Interval or 0.35, Knockback = o.Knockback or 0 },
+		Tags = { MapKit.TAG_HAZARD },
+	}, parent)
+	return part
+end
+
+--- Trampolín / hongo rebotador.
+function MapKit.bouncy(parent: Instance, cf: CFrame, size: Vector3, color: Color3, power: number): BasePart
+	return Build.part({
+		Name = "Bouncy", Size = size, Color = color, CFrame = cf,
+		Material = Enum.Material.Neon, Stud = false,
+		Attributes = { Power = power },
+		Tags = { MapKit.TAG_BOUNCY },
+	}, parent)
+end
+
+--- Rampa de acceso.
+function MapKit.ramp(parent: Instance, cf: CFrame, size: Vector3, color: Color3): BasePart
+	return Build.wedge({ Name = "Ramp", Size = size, Color = color, CFrame = cf }, parent)
+end
+
+--- Isla flotante con base piramidal invertida.
+function MapKit.island(parent: Instance, center: Vector3, radius: number, thickness: number, top: Color3, bottom: Color3)
+	Build.part({
+		Name = "IslandTop", Size = Vector3.new(radius * 2, thickness, radius * 2),
+		Color = top, Position = center, Shadow = true,
+	}, parent)
+	local layers = 3
+	for i = 1, layers do
+		local f = 1 - i / (layers + 0.6)
+		Build.part({
+			Name = "IslandBase",
+			Size = Vector3.new(radius * 2 * f, thickness, radius * 2 * f),
+			Color = Palette.darken(bottom, 0.06 * i),
+			Position = center - Vector3.new(0, thickness * i, 0),
+			CanCollide = false,
+		}, parent)
+	end
+end
+
+--- Escalera de bloques.
+function MapKit.stairs(parent: Instance, start: CFrame, steps: number, stepSize: Vector3, color: Color3)
+	for i = 1, steps do
+		Build.part({
+			Name = "Step", Size = stepSize, Color = Palette.vary(color, 0.01, 0.03, 0.05),
+			CFrame = start * CFrame.new(0, stepSize.Y * (i - 0.5), -stepSize.Z * (i - 0.5)),
+		}, parent)
+	end
+end
+
+--- Muro perimetral invisible para que nadie caiga al vacío por error de diseño.
+function MapKit.bounds(parent: Instance, center: Vector3, size: Vector3, height: number)
+	local half = size / 2
+	local sides = {
+		{ Vector3.new(center.X, center.Y + height / 2, center.Z - half.Z), Vector3.new(size.X, height, 2) },
+		{ Vector3.new(center.X, center.Y + height / 2, center.Z + half.Z), Vector3.new(size.X, height, 2) },
+		{ Vector3.new(center.X - half.X, center.Y + height / 2, center.Z), Vector3.new(2, height, size.Z) },
+		{ Vector3.new(center.X + half.X, center.Y + height / 2, center.Z), Vector3.new(2, height, size.Z) },
+	}
+	for _, s in ipairs(sides) do
+		Build.part({
+			Name = "Bound", Size = s[2], Position = s[1], Transparency = 1,
+			CanCollide = true, Stud = false, CastShadow = false,
+		}, parent)
+	end
+end
+
+--- Plano de vacío: mata a quien cae fuera del mapa.
+function MapKit.voidPlane(parent: Instance, center: Vector3, size: number, y: number)
+	MapKit.hazard(parent, CFrame.new(center.X, y, center.Z), Vector3.new(size, 4, size),
+		Color3.fromRGB(20, 20, 30), 9999, { Name = "Void", Transparency = 1, Interval = 0.1, Material = Enum.Material.SmoothPlastic })
+end
+
+--- Devuelve N CFrames en círculo mirando al centro, elevados `y`.
+function MapKit.spawnRing(center: Vector3, radius: number, count: number, y: number): { CFrame }
+	local out = {}
+	for i = 1, count do
+		local ang = (i / count) * math.pi * 2
+		local pos = center + Vector3.new(math.cos(ang) * radius, y, math.sin(ang) * radius)
+		table.insert(out, CFrame.lookAt(pos, Vector3.new(center.X, pos.Y, center.Z)))
+	end
+	return out
+end
+
+--- Cartel holográfico / tótem temático del mapa.
+function MapKit.totem(parent: Instance, cf: CFrame, text: string, color: Color3)
+	Build.sign(cf * CFrame.new(0, 10, 0), text, { Width = 26, Height = 7, Color = Palette.Ink, Accent = color }, parent)
+	Build.part({ Name = "TotemBase", Size = Vector3.new(6, 10, 6), Color = Palette.darken(color, 0.35), CFrame = cf * CFrame.new(0, 5, 0) }, parent)
+end
+
+return MapKit
+]]></ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="RBX8">
+        <Properties>
+          <string name="Name">MapRegistry</string>
+          <ProtectedString name="Source"><![CDATA[--[[
+	MapRegistry.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Maps > MapRegistry   (ModuleScript)
+
+	Índice de los 5 mapas temáticos. Para añadir un mapa nuevo basta con crear
+	el ModuleScript con la misma interfaz (Id, Name, Theme, Colors, Lighting,
+	Build(origin, rng) -> Model, spawns) y registrarlo aquí.
+]]
+
+local MapRegistry = {}
+
+local modules = {
+	require(script.Parent.VolcanicIsland),
+	require(script.Parent.ArcticTemple),
+	require(script.Parent.EnchantedForest),
+	require(script.Parent.DesertRuins),
+	require(script.Parent.CyberCity),
+}
+
+MapRegistry.List = modules
+
+MapRegistry.ById = {}
+for _, m in ipairs(modules) do
+	MapRegistry.ById[m.Id] = m
+end
+
+--- Información ligera (sin funciones) para mandar a la UI de votación.
+function MapRegistry.GetInfo(map): { [string]: any }
+	return {
+		Id = map.Id,
+		Name = map.Name,
+		Theme = map.Theme,
+		Description = map.Description,
+		Primary = map.Colors.Primary,
+		Secondary = map.Colors.Secondary,
+		Accent = map.Colors.Accent,
+	}
+end
+
+--- N mapas distintos al azar, evitando repetir el último jugado.
+function MapRegistry.PickOptions(count: number, excludeId: string?, rng: Random?)
+	local r = rng or Random.new(os.clock() * 1e6)
+	local pool = {}
+	for _, m in ipairs(modules) do
+		if m.Id ~= excludeId then table.insert(pool, m) end
+	end
+	-- Fisher-Yates
+	for i = #pool, 2, -1 do
+		local j = r:NextInteger(1, i)
+		pool[i], pool[j] = pool[j], pool[i]
+	end
+	local out = {}
+	for i = 1, math.min(count, #pool) do
+		table.insert(out, pool[i])
+	end
+	return out
+end
+
+return MapRegistry
+]]></ProtectedString>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="RBX9">
+        <Properties>
+          <string name="Name">VolcanicIsland</string>
+          <ProtectedString name="Source"><![CDATA[--[[
+	VolcanicIsland.lua — MAPA 1
+	Ubicación en Roblox: ReplicatedStorage > Shared > Maps > VolcanicIsland   (ModuleScript)
+
+	Tema: Isla Volcánica / Lava Stud.
+	Mar de lava, volcán central con cráter, anillos de obsidiana, puentes
+	colgantes y géiseres que hacen daño. Verticalidad media-alta.
+]]
+
+local Build = require(script.Parent.Parent.Build)
+local Palette = require(script.Parent.Parent.Palette)
+local MapKit = require(script.Parent.MapKit)
+
+local Map = {}
+
+Map.Id = "volcano"
+Map.Name = "ISLA VOLCÁNICA"
+Map.Theme = "Lava Stud"
+Map.Description = "Roca negra, ríos de lava y géiseres. No toques el suelo naranja."
+Map.Colors = {
+	Primary = Color3.fromRGB(58, 44, 52),
+	Secondary = Color3.fromRGB(255, 112, 32),
+	Accent = Color3.fromRGB(255, 196, 40),
+}
+Map.Lighting = {
+	ClockTime = 17.4, Brightness = 2.2,
+	Ambient = Color3.fromRGB(78, 46, 40), OutdoorAmbient = Color3.fromRGB(120, 60, 40),
+	FogColor = Color3.fromRGB(120, 48, 24), FogEnd = 900,
+	AtmosphereColor = Color3.fromRGB(150, 70, 40), AtmosphereDensity = 0.42,
+	AtmosphereHaze = 2.4, AtmosphereTint = Color3.fromRGB(255, 160, 110),
+}
+
+function Map.Build(origin: Vector3, rng: Random): (Model, { CFrame })
+	local model = Build.model("Map_" .. Map.Id)
+	local rock = Map.Colors.Primary
+	local lava = Map.Colors.Secondary
+	local ember = Map.Colors.Accent
+
+	-- Mar de lava (una sola parte grande + daño)
+	MapKit.hazard(model, CFrame.new(origin), Vector3.new(520, 6, 520), lava, 22, {
+		Name = "LavaSea", Transparency = 0.05, CanCollide = true, Interval = 0.3,
+	})
+
+	-- Isla principal
+	Build.part({ Name = "Island", Size = Vector3.new(300, 10, 300), Color = rock,
+		Position = origin + Vector3.new(0, 7, 0), Shadow = true }, model)
+	Build.part({ Name = "IslandRim", Size = Vector3.new(316, 4, 316), Color = Palette.darken(rock, 0.1),
+		Position = origin + Vector3.new(0, 2, 0) }, model)
+
+	-- Grietas de lava en el suelo (decorativas + daño leve)
+	for i = 1, 7 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local dist = rng:NextNumber(40, 125)
+		local pos = origin + Vector3.new(math.cos(ang) * dist, 12.2, math.sin(ang) * dist)
+		MapKit.hazard(model, CFrame.new(pos) * CFrame.Angles(0, ang, 0),
+			Vector3.new(rng:NextNumber(18, 46), 0.6, rng:NextNumber(6, 12)), lava, 10,
+			{ Name = "Crack", Transparency = 0.1, Interval = 0.5 })
+	end
+
+	-- Volcán central escalonado + cráter
+	local tiers = 6
+	for i = 1, tiers do
+		local w = 120 - i * 15
+		Build.part({
+			Name = "VolcanoTier", Size = Vector3.new(w, 9, w),
+			Color = Palette.vary(rock, 0.01, 0.04, 0.05, rng),
+			CFrame = CFrame.new(origin + Vector3.new(0, 12 + i * 8.5, 0)) * CFrame.Angles(0, math.rad(i * 9), 0),
+			Shadow = i <= 2,
+		}, model)
+	end
+	local craterY = 12 + tiers * 8.5 + 5
+	MapKit.hazard(model, CFrame.new(origin + Vector3.new(0, craterY, 0)), Vector3.new(28, 3, 28), lava, 35,
+		{ Name = "Crater", CanCollide = true, Transparency = 0, Interval = 0.25 })
+	Build.neon({ Name = "CraterGlow", Size = Vector3.new(26, 60, 26), Color = ember, Transparency = 0.86,
+		CanCollide = false, Position = origin + Vector3.new(0, craterY + 30, 0) }, model)
+	Build.light(model:FindFirstChild("CraterGlow") :: BasePart, ember, 60, 4)
+
+	-- Plataformas de obsidiana flotantes alrededor del cono
+	for i = 1, 10 do
+		local ang = (i / 10) * math.pi * 2
+		local r = rng:NextNumber(62, 96)
+		local y = 24 + rng:NextNumber(0, 34)
+		local pos = origin + Vector3.new(math.cos(ang) * r, y, math.sin(ang) * r)
+		Build.part({
+			Name = "Obsidian", Size = Vector3.new(rng:NextNumber(16, 26), 3, rng:NextNumber(16, 26)),
+			Color = Palette.darken(rock, 0.08), CFrame = CFrame.new(pos) * CFrame.Angles(0, ang, 0), Shadow = true,
+		}, model)
+		Build.neon({ Name = "Edge", Size = Vector3.new(4, 0.5, 4), Color = lava, CanCollide = false,
+			Position = pos + Vector3.new(0, 1.8, 0), Transparency = 0.25 }, model)
+	end
+
+	-- Puentes de roca hacia el cono
+	for i = 1, 4 do
+		local ang = (i / 4) * math.pi * 2 + math.pi / 8
+		local dir = Vector3.new(math.cos(ang), 0, math.sin(ang))
+		for s = 1, 7 do
+			local pos = origin + dir * (44 + s * 8) + Vector3.new(0, 14 + s * 1.2, 0)
+			Build.part({
+				Name = "BridgePlank", Size = Vector3.new(9, 1.4, 8), Color = Palette.darken(rock, 0.04),
+				CFrame = CFrame.new(pos) * CFrame.Angles(0, -ang, 0),
+			}, model)
+		end
+	end
+
+	-- Géiseres: columnas de lava intermitentes (tag hazard, animadas por el cliente)
+	for i = 1, 6 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(50, 130)
+		local pos = origin + Vector3.new(math.cos(ang) * r, 13, math.sin(ang) * r)
+		Build.part({ Name = "GeyserBase", Size = Vector3.new(12, 2, 12), Color = Palette.darken(rock, 0.16), Position = pos }, model)
+		MapKit.hazard(model, CFrame.new(pos + Vector3.new(0, 16, 0)), Vector3.new(7, 30, 7), ember, 18,
+			{ Name = "GeyserJet", Transparency = 0.45, Interval = 0.4 })
+	end
+
+	-- Rocas y brasas decorativas
+	for i = 1, 22 do
+		local ang = rng:NextNumber(0, math.pi * 2)
+		local r = rng:NextNumber(30, 142)
+		local s = rng:NextNumber(3, 9)
+		Build.part({
+			Name = "Rock", Size = Vector3.new(s, s * rng:NextNumber(0.6, 1.3), s),
+			Color = Palette.vary(rock, 0.02, 0.05, 0.08, rng),
+			CFrame = CFrame.new(origin + Vector3.new(math.cos(ang) * r, 12 + s / 2, math.sin(ang) * r))
+				* CFrame.Angles(rng:NextNumber(-0.2, 0.2), rng:NextNumber(0, 6), rng:NextNumber(-0.2, 0.2)),
+		}, model)
+	end
+
+	MapKit.totem(model, CFrame.new(origin + Vector3.new(0, 12, 120)), "ISLA VOLCÁNICA", lava)
+	MapKit.voidPlane(model, origin, 900, -40)
+
+	local spawns = MapKit.spawnRing(origin, 112, 12, 16)
+	return model, spawns
+end
+
+return Map
+]]></ProtectedString>
+        </Properties>
+      </Item>
+
+    </Item>
+    <Item class="ModuleScript" referent="RBX10">
+      <Properties>
+        <string name="Name">Build</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	Build.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Build   (ModuleScript)
+
+	Fábrica de geometría. TODO el mundo (lobby, tiendas, huevos, mapas, tableros)
+	se construye con estas funciones, así la estética Stud y los ajustes de
+	rendimiento quedan centralizados.
+
+	Reglas de rendimiento aplicadas por defecto:
+	  · Anchored = true          (cero simulación de física)
+	  · CastShadow = false       (las sombras se activan solo donde aportan)
+	  · Studs reales en 6 caras  (StudMaterial)
+]]
+
+local Debris = game:GetService("Debris")
+local CollectionService = game:GetService("CollectionService")
+
+local StudMaterial = require(script.Parent.StudMaterial)
+local Palette = require(script.Parent.Palette)
+
+local Build = {}
+
+local RESERVED = {
+	Class = true, CFrame = true, Position = true, Stud = true,
+	Attributes = true, Tags = true, Parent = true, Shadow = true,
+}
+
+--- Crea una BasePart con estética Stud.
+-- props admite cualquier propiedad de Part + claves especiales:
+--   Class="WedgePart"|"Part"|"TrussPart", Stud=false (caras lisas),
+--   Shadow=true, Attributes={}, Tags={}
+function Build.part(props: { [string]: any }?, parent: Instance?): BasePart
+	props = props or {}
+	local part = Instance.new((props :: any).Class or "Part") :: BasePart
+	part.Anchored = true
+	part.CanCollide = true
+	part.CastShadow = false
+	part.Size = Vector3.new(4, 1, 4)
+	part.Color = Palette.White
+	part.Material = StudMaterial.Material
+
+	for key, value in pairs(props :: any) do
+		if not RESERVED[key] then
+			(part :: any)[key] = value
+		end
+	end
+
+	if (props :: any).Shadow then part.CastShadow = true end
+
+	if (props :: any).Stud == false then
+		StudMaterial.smooth(part)
+	else
+		StudMaterial.apply(part)
+	end
+
+	if (props :: any).CFrame then
+		part.CFrame = (props :: any).CFrame
+	elseif (props :: any).Position then
+		part.Position = (props :: any).Position
+	end
+
+	if (props :: any).Attributes then
+		for k, v in pairs((props :: any).Attributes) do
+			part:SetAttribute(k, v)
+		end
+	end
+	if (props :: any).Tags then
+		for _, tag in ipairs((props :: any).Tags) do
+			CollectionService:AddTag(part, tag)
+		end
+	end
+
+	part.Parent = parent
+	return part
+end
+
+--- Parte neón (sin studs, con brillo limpio).
+function Build.neon(props: { [string]: any }?, parent: Instance?): BasePart
+	props = props or {}
+	;(props :: any).Material = Enum.Material.Neon
+	;(props :: any).Stud = false
+	return Build.part(props, parent)
+end
+
+--- Cilindro (eje X). Para postes usa CFrame * CFrame.Angles(0,0,math.rad(90)).
+function Build.cylinder(props: { [string]: any }?, parent: Instance?): BasePart
+	props = props or {}
+	local p = Build.part(props, parent)
+	p.Shape = Enum.PartType.Cylinder
+	return p
+end
+
+--- Esfera / elipsoide (usa SpecialMesh para permitir escala no uniforme).
+function Build.sphere(props: { [string]: any }?, parent: Instance?, meshScale: Vector3?): BasePart
+	local p = Build.part(props, parent)
+	p.Shape = Enum.PartType.Ball
+	if meshScale then
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.Sphere
+		mesh.Scale = meshScale
+		mesh.Parent = p
+	end
+	return p
+end
+
+function Build.wedge(props: { [string]: any }?, parent: Instance?): BasePart
+	props = props or {}
+	;(props :: any).Class = "WedgePart"
+	return Build.part(props, parent)
+end
+
+--- Modelo vacío con nombre.
+function Build.model(name: string, parent: Instance?): Model
+	local m = Instance.new("Model")
+	m.Name = name
+	m.Parent = parent
+	return m
+end
+
+function Build.folder(name: string, parent: Instance?): Folder
+	local f = Instance.new("Folder")
+	f.Name = name
+	f.Parent = parent
+	return f
+end
+
+--- PointLight optimizado (rango corto, sin sombras).
+function Build.light(parent: Instance, color: Color3, range: number?, brightness: number?): PointLight
+	local l = Instance.new("PointLight")
+	l.Color = color
+	l.Range = range or 22
+	l.Brightness = brightness or 2.4
+	l.Shadows = false
+	l.Parent = parent
+	return l
+end
+
+--- Farol stud completo: poste + bombilla neón + luz.
+function Build.lamp(cf: CFrame, color: Color3, parent: Instance?, height: number?): Model
+	local h = height or 14
+	local model = Build.model("Lamp", parent)
+
+	Build.part({
+		Name = "Base", Size = Vector3.new(3, 1, 3), Color = Palette.Ink,
+		CFrame = cf * CFrame.new(0, 0.5, 0),
+	}, model)
+
+	Build.part({
+		Name = "Post", Size = Vector3.new(1, h, 1), Color = Palette.darken(color, 0.4),
+		CFrame = cf * CFrame.new(0, h / 2 + 1, 0),
+	}, model)
+
+	local bulb = Build.neon({
+		Name = "Bulb", Size = Vector3.new(2.4, 2.4, 2.4), Color = color,
+		CFrame = cf * CFrame.new(0, h + 1.8, 0), CanCollide = false,
+	}, model)
+	Build.light(bulb, color, 30, 3)
+
+	Build.part({
+		Name = "Cap", Size = Vector3.new(3.4, 0.8, 3.4), Color = Palette.Ink,
+		CFrame = cf * CFrame.new(0, h + 3.4, 0), CanCollide = false,
+	}, model)
+
+	model.PrimaryPart = model:FindFirstChild("Post") :: BasePart
+	return model
+end
+
+--- Letrero con SurfaceGui (texto nítido, sin assets externos).
+function Build.sign(cf: CFrame, text: string, opts: { [string]: any }?, parent: Instance?): BasePart
+	opts = opts or {}
+	local o = opts :: any
+	local width  = o.Width or 18
+	local height = o.Height or 5
+	local color  = o.Color or Palette.Ink
+	local accent = o.Accent or Palette.Cyan
+
+	local board = Build.part({
+		Name = o.Name or "Sign",
+		Size = Vector3.new(width, height, 0.8),
+		Color = color, CFrame = cf, CanCollide = false,
+	}, parent)
+
+	-- marco neón
+	Build.neon({
+		Name = "Frame", Size = Vector3.new(width + 0.8, height + 0.8, 0.5),
+		Color = accent, CFrame = cf * CFrame.new(0, 0, -0.2), CanCollide = false,
+		Transparency = 0.15,
+	}, board)
+
+	local gui = Instance.new("SurfaceGui")
+	gui.Name = "Display"
+	gui.Face = Enum.NormalId.Front
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = o.PixelsPerStud or 36
+	gui.LightInfluence = 0
+	gui.MaxDistance = o.MaxDistance or 180
+	gui.Parent = board
+
+	local label = Instance.new("TextLabel")
+	label.Name = "Text"
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = o.Font or Enum.Font.FredokaOne
+	label.Text = text
+	label.TextColor3 = o.TextColor or Palette.White
+	label.TextScaled = true
+	label.RichText = true
+	label.Parent = gui
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 3
+	stroke.Color = Palette.darken(accent, 0.45)
+	stroke.Parent = label
+
+	local grad = Instance.new("UIGradient")
+	grad.Color = ColorSequence.new(o.TextColor or Palette.White, accent)
+	grad.Rotation = 90
+	grad.Parent = label
+
+	return board
+end
+
+--- ProximityPrompt estándar del juego.
+function Build.prompt(parent: BasePart, actionText: string, objectText: string, distance: number?): ProximityPrompt
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.ActionText = actionText
+	prompt.ObjectText = objectText
+	prompt.HoldDuration = 0
+	prompt.MaxActivationDistance = distance or 12
+	prompt.RequiresLineOfSight = false
+	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.Parent = parent
+	return prompt
+end
+
+--- Suelo en damero de baldosas Stud (pocas partes grandes = buen FPS).
+function Build.checkerFloor(center: Vector3, size: Vector3, tile: number, a: Color3, b: Color3, parent: Instance?): Folder
+	local folder = Build.folder("Floor", parent)
+	local cols = math.max(1, math.floor(size.X / tile))
+	local rows = math.max(1, math.floor(size.Z / tile))
+	local startX = center.X - (cols * tile) / 2 + tile / 2
+	local startZ = center.Z - (rows * tile) / 2 + tile / 2
+
+	for ix = 0, cols - 1 do
+		for iz = 0, rows - 1 do
+			local even = (ix + iz) % 2 == 0
+			Build.part({
+				Name = "Tile",
+				Size = Vector3.new(tile, size.Y, tile),
+				Color = even and a or b,
+				Position = Vector3.new(startX + ix * tile, center.Y - size.Y / 2, startZ + iz * tile),
+			}, folder)
+		end
+	end
+	return folder
+end
+
+--- Camino de baldosas entre dos puntos.
+function Build.path(from: Vector3, to: Vector3, width: number, colorA: Color3, colorB: Color3, parent: Instance?): Folder
+	local folder = Build.folder("Path", parent)
+	local delta = to - from
+	local length = delta.Magnitude
+	local steps = math.max(1, math.floor(length / width))
+	local dir = delta.Unit
+	for i = 0, steps - 1 do
+		local pos = from + dir * (i * width + width / 2)
+		Build.part({
+			Name = "PathTile",
+			Size = Vector3.new(width, 0.4, width),
+			Color = (i % 2 == 0) and colorA or colorB,
+			CFrame = CFrame.lookAt(Vector3.new(pos.X, from.Y + 0.2, pos.Z), Vector3.new(pos.X, from.Y + 0.2, pos.Z) + dir),
+			CanCollide = false,
+		}, folder)
+	end
+	return folder
+end
+
+--- Anillo decorativo de bloques (plazas, pedestales, arenas).
+function Build.ring(center: Vector3, radius: number, count: number, blockSize: Vector3, color: Color3, parent: Instance?): Folder
+	local folder = Build.folder("Ring", parent)
+	for i = 1, count do
+		local ang = (i / count) * math.pi * 2
+		local pos = center + Vector3.new(math.cos(ang) * radius, 0, math.sin(ang) * radius)
+		Build.part({
+			Name = "RingBlock", Size = blockSize, Color = color,
+			CFrame = CFrame.new(pos) * CFrame.Angles(0, -ang, 0),
+		}, folder)
+	end
+	return folder
+end
+
+--- Arco de entrada stud.
+function Build.arch(cf: CFrame, width: number, height: number, color: Color3, accent: Color3, parent: Instance?): Model
+	local m = Build.model("Arch", parent)
+	for _, side in ipairs({ -1, 1 }) do
+		Build.part({
+			Size = Vector3.new(3, height, 3), Color = color,
+			CFrame = cf * CFrame.new(side * width / 2, height / 2, 0),
+		}, m)
+	end
+	Build.part({
+		Size = Vector3.new(width + 3, 3, 3.4), Color = color,
+		CFrame = cf * CFrame.new(0, height + 1.5, 0),
+	}, m)
+	Build.neon({
+		Size = Vector3.new(width - 1, 0.8, 1.2), Color = accent, CanCollide = false,
+		CFrame = cf * CFrame.new(0, height - 0.4, 0),
+	}, m)
+	return m
+end
+
+--- Limpieza garantizada (nunca dejar basura en Workspace).
+function Build.destroyIn(inst: Instance, seconds: number)
+	Debris:AddItem(inst, seconds)
+end
+
+--- Texto flotante 3D (BillboardGui) reutilizable.
+function Build.billboard(adornee: Instance, text: string, opts: { [string]: any }?): BillboardGui
+	opts = opts or {}
+	local o = opts :: any
+	local bb = Instance.new("BillboardGui")
+	bb.Name = o.Name or "Billboard"
+	bb.Adornee = adornee :: any
+	bb.Size = o.Size or UDim2.new(0, 220, 0, 55)
+	bb.StudsOffset = o.StudsOffset or Vector3.new(0, 3, 0)
+	bb.AlwaysOnTop = o.AlwaysOnTop ~= false
+	bb.MaxDistance = o.MaxDistance or 60
+	bb.LightInfluence = 0
+	bb.Parent = o.Parent or adornee
+
+	local label = Instance.new("TextLabel")
+	label.Name = "Label"
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = o.Font or Enum.Font.FredokaOne
+	label.Text = text
+	label.TextScaled = true
+	label.RichText = true
+	label.TextColor3 = o.TextColor or Palette.White
+	label.Parent = bb
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = o.StrokeThickness or 2.5
+	stroke.Color = o.StrokeColor or Palette.Ink
+	stroke.Parent = label
+
+	return bb
+end
+
+return Build
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX11">
+      <Properties>
+        <string name="Name">Config</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	Config.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Config   (ModuleScript)
+
+	Configuración central de STUD LEGENDS.
+	Todo lo ajustable del juego vive aquí: tiempos, precios, colores, VFX, perf.
+]]
+
+local Config = {}
+
+Config.GameName   = "STUD LEGENDS"
+Config.Tagline    = "Arena Stud · Rondas · Huevos · Leyendas"
+Config.Version    = "1.0.0"
+Config.Debug      = false
+
+-- ───────────────────────────────── RENDIMIENTO (objetivo 60 FPS) ─────────────
+Config.Performance = {
+	MaxLobbyTrees       = 44,     -- árboles procedurales del lobby
+	VFXDistance         = 170,    -- studs: distancia máx. para reproducir el VFX de rayo
+	ShakeDistance       = 42,     -- studs: distancia máx. para el camera shake
+	BoardMaxDistance    = 120,    -- SurfaceGui.MaxDistance de los leaderboards físicos
+	TitleUpdateInterval = 0.10,   -- s: refresco del escalado de títulos 3D (no RenderStepped pesado)
+	SpinInterval        = 1 / 30, -- s: giro de huevos/decoración (solo cliente)
+	MaxSparkParts       = 14,     -- chispas físicas por impacto
+	DebrisLifetime      = 2.2,    -- s: vida máxima de cualquier pieza de VFX
+	StreamingEnabled    = true,   -- streaming del Workspace para mapas grandes
+}
+
+-- ───────────────────────────────── CICLO DE RONDAS ───────────────────────────
+Config.Round = {
+	MinPlayers       = 1,    -- 1 para pruebas en solitario; sube a 2 en producción
+	Intermission     = 18,   -- s de descanso en el lobby
+	Voting           = 20,   -- s de votación de mapa
+	Preparing        = 4,    -- s de construcción + teletransporte
+	Duration         = 150,  -- s de combate / supervivencia
+	PostRound        = 8,    -- s de resultados antes de limpiar el mapa
+	VoteOptions      = 3,    -- mapas ofrecidos por votación
+	RewardWin        = 250,  -- monedas por ganar
+	RewardKill       = 35,   -- monedas por kill
+	RewardSurvivePerSec = 1, -- monedas por cada 10 s sobrevividos (ver RoundService)
+}
+
+-- ───────────────────────────────── COMBATE ───────────────────────────────────
+Config.Combat = {
+	ToolName       = "Stud Blaster",
+	Damage         = 34,
+	HeadMultiplier = 1.6,
+	Cooldown       = 0.42,
+	Range          = 260,
+	Invulnerability = 3.0,  -- s de protección tras aparecer (sin ForceField azul)
+}
+
+-- ───────────────────────────────── SPAWN VFX (RAYO + IMPACTO) ────────────────
+Config.SpawnVFX = {
+	SkyHeight      = 260,   -- studs sobre el jugador donde nace el rayo
+	AnticipationT  = 0.18,  -- fase 1
+	StrikeT        = 0.09,  -- fase 2 (caída del rayo)
+	ImpactT        = 0.55,  -- fase 3 (onda + materialización)
+	BoltSegments   = 9,
+	BoltWidth      = 1.7,
+	RingMaxSize    = 26,
+	MarkSize       = 9,
+	LightRange     = 46,
+	LightBrightness = 9,
+	ShakeIntensity = 0.85,
+	ShakeTime      = 0.45,
+}
+
+-- ───────────────────────────────── SONIDOS ───────────────────────────────────
+-- Los `rbxasset://` son archivos que vienen con el cliente de Roblox (siempre suenan).
+-- Reemplaza por tus propios `rbxassetid://` cuando subas audio a tu experiencia.
+Config.Sounds = {
+	Thunder   = "rbxasset://sounds/HalloweenThunder.wav",
+	Zap       = "rbxasset://sounds/electronicpingshort.wav",
+	Impact    = "rbxasset://sounds/collide.wav",
+	UIClick   = "rbxasset://sounds/clickfast.wav",
+	Purchase  = "rbxasset://sounds/bass.wav",
+	EggCrack  = "rbxasset://sounds/snap.mp3",
+	Reveal    = "rbxasset://sounds/electronicpingshort.wav",
+	Blaster   = "rbxasset://sounds/swoosh.wav",
+	Victory   = "rbxasset://sounds/Victory.wav",
+}
+
+-- ───────────────────────────────── DATOS / DATASTORE ─────────────────────────
+Config.Data = {
+	Scope            = "v1",
+	PlayerStoreKey   = "StudLegends_Player",
+	OrderedKills     = "StudLegends_Top_Kills_v1",
+	OrderedStreak    = "StudLegends_Top_Streak_v1",
+	OrderedPlaytime  = "StudLegends_Top_Playtime_v1",
+	AutosaveInterval = 120,  -- s
+	PlaytimeTick     = 15,   -- s: cada cuánto se acumula tiempo jugado
+	RetryCount       = 4,
+	RetryWait        = 2,
+}
+
+Config.DefaultData = {
+	Kills        = 0,
+	Deaths       = 0,
+	Streak       = 0,    -- racha actual
+	BestStreak   = 0,    -- racha máxima (la que se publica al Top)
+	Playtime     = 0,    -- segundos acumulados
+	Coins        = 300,
+	Wins         = 0,
+	Pets         = {},   -- { [petId] = cantidad }
+	Purchases    = {},   -- { [itemId] = true }
+	EquippedPet  = "",
+	SchemaVersion = 1,
+}
+
+-- ───────────────────────────────── LEADERBOARDS ──────────────────────────────
+Config.Leaderboards = {
+	TopCount        = 100,
+	RefreshInterval = 120,  -- s entre lecturas del OrderedDataStore
+	Categories = {
+		{ Id = "Kills",    Title = "TOP 100 KILLS",        Stat = "Kills",      Suffix = " kills",
+		  Accent = Color3.fromRGB(255, 76, 110),  Store = "OrderedKills" },
+		{ Id = "Streak",   Title = "TOP 100 RACHA",        Stat = "BestStreak", Suffix = " racha",
+		  Accent = Color3.fromRGB(0, 225, 255),   Store = "OrderedStreak" },
+		{ Id = "Playtime", Title = "TOP 100 HORAS JUGADAS",Stat = "Playtime",   Suffix = "",
+		  Accent = Color3.fromRGB(170, 110, 255), Store = "OrderedPlaytime", IsTime = true },
+	},
+}
+
+-- ───────────────────────────────── TÍTULOS 3D (TOP 3) ────────────────────────
+Config.Titles = {
+	BillboardSize   = UDim2.new(0, 220, 0, 55), -- tamaño FIJO en offset (no escala con la cámara)
+	MaxDistance     = 30,                        -- visible solo a 30 studs
+	StudsOffset     = Vector3.new(0, 3.3, 0),    -- justo encima del nombre del jugador
+	ConstantScreenSize = true,                   -- compensa el escalado por distancia (ver TitleController)
+}
+
+-- ───────────────────────────────── TIENDAS ───────────────────────────────────
+Config.Shops = {
+	{
+		Id = "boosts", Name = "BOOST STATION", Icon = "⚡",
+		Color = Color3.fromRGB(255, 196, 0), Side = "left", Slot = 1,
+		Items = {
+			{ Id = "boost_speed",  Name = "Velocidad +40%", Price = 450,  Desc = "Durante toda la ronda", Kind = "boost" },
+			{ Id = "boost_jump",   Name = "Salto +60%",     Price = 400,  Desc = "Durante toda la ronda", Kind = "boost" },
+			{ Id = "boost_health", Name = "Vida +50",       Price = 700,  Desc = "Empiezas con 150 HP",   Kind = "boost" },
+		},
+	},
+	{
+		Id = "cosmetics", Name = "STUD COSMETICS", Icon = "✦",
+		Color = Color3.fromRGB(255, 72, 196), Side = "left", Slot = 2,
+		Items = {
+			{ Id = "trail_neon",   Name = "Estela Neón",    Price = 900,  Desc = "Rastro de studs",       Kind = "cosmetic" },
+			{ Id = "aura_lime",    Name = "Aura Lima",      Price = 1200, Desc = "Partículas verdes",     Kind = "cosmetic" },
+			{ Id = "bolt_gold",    Name = "Rayo Dorado",    Price = 2500, Desc = "Tu rayo de aparición",  Kind = "cosmetic" },
+		},
+	},
+	{
+		Id = "round", Name = "ROUND SUPPLY", Icon = "◈",
+		Color = Color3.fromRGB(0, 230, 190), Side = "left", Slot = 3,
+		Items = {
+			{ Id = "item_shield",  Name = "Escudo Stud",    Price = 650,  Desc = "+1 golpe aguantado",    Kind = "item" },
+			{ Id = "item_medkit",  Name = "Medkit",         Price = 350,  Desc = "Cura 50 HP en ronda",   Kind = "item" },
+			{ Id = "item_double",  Name = "Doble Daño",     Price = 1400, Desc = "x2 daño una ronda",     Kind = "item" },
+		},
+	},
+	{
+		Id = "pets", Name = "PET BAZAAR", Icon = "❖",
+		Color = Color3.fromRGB(120, 160, 255), Side = "right", Slot = 1,
+		Items = {
+			{ Id = "pet_slot",     Name = "Slot de Mascota",Price = 1500, Desc = "+1 mascota equipada",   Kind = "upgrade" },
+			{ Id = "pet_lucky",    Name = "Suerte +15%",    Price = 2000, Desc = "Mejores huevos",        Kind = "upgrade" },
+		},
+	},
+	{
+		Id = "coins", Name = "COIN FORGE", Icon = "◉",
+		Color = Color3.fromRGB(255, 140, 40), Side = "right", Slot = 2,
+		Items = {
+			{ Id = "coin_mult",    Name = "Monedas x1.5",   Price = 3000, Desc = "Permanente",            Kind = "upgrade" },
+			{ Id = "coin_daily",   Name = "Bono Diario",    Price = 1000, Desc = "+200 al entrar",        Kind = "upgrade" },
+		},
+	},
+	{
+		Id = "titles", Name = "TITLE LAB", Icon = "★",
+		Color = Color3.fromRGB(180, 255, 90), Side = "right", Slot = 3,
+		Items = {
+			{ Id = "title_rookie", Name = "Título: NOVATO", Price = 300,  Desc = "Título 3D básico",      Kind = "title" },
+			{ Id = "title_pro",    Name = "Título: PRO",    Price = 1800, Desc = "Título 3D con brillo",  Kind = "title" },
+		},
+	},
+}
+
+-- ───────────────────────────────── HUEVOS ────────────────────────────────────
+Config.Eggs = {
+	{
+		Id = "basic", Name = "HUEVO STUD", Price = 250,
+		Color = Color3.fromRGB(120, 255, 140), Accent = Color3.fromRGB(0, 180, 90),
+		Rewards = {
+			{ Id = "pet_bloxy",   Name = "Bloxy",     Rarity = "Común",     Weight = 55, Color = Color3.fromRGB(150, 255, 150) },
+			{ Id = "pet_cubic",   Name = "Cubic",     Rarity = "Raro",      Weight = 28, Color = Color3.fromRGB(80, 200, 255) },
+			{ Id = "pet_zappy",   Name = "Zappy",     Rarity = "Épico",     Weight = 13, Color = Color3.fromRGB(190, 110, 255) },
+			{ Id = "pet_golden",  Name = "Golden Stud",Rarity = "Legendario",Weight = 4, Color = Color3.fromRGB(255, 205, 55) },
+		},
+	},
+	{
+		Id = "neon", Name = "HUEVO NEÓN", Price = 900,
+		Color = Color3.fromRGB(0, 235, 255), Accent = Color3.fromRGB(0, 120, 190),
+		Rewards = {
+			{ Id = "pet_neonfox", Name = "Neon Fox",  Rarity = "Raro",      Weight = 48, Color = Color3.fromRGB(0, 255, 210) },
+			{ Id = "pet_prism",   Name = "Prisma",    Rarity = "Épico",     Weight = 32, Color = Color3.fromRGB(255, 110, 230) },
+			{ Id = "pet_volt",    Name = "Volt",      Rarity = "Legendario",Weight = 15, Color = Color3.fromRGB(255, 230, 60) },
+			{ Id = "pet_void",    Name = "Void Stud", Rarity = "Mítico",    Weight = 5,  Color = Color3.fromRGB(150, 60, 255) },
+		},
+	},
+	{
+		Id = "magma", Name = "HUEVO MAGMA", Price = 2200,
+		Color = Color3.fromRGB(255, 110, 40), Accent = Color3.fromRGB(190, 40, 0),
+		Rewards = {
+			{ Id = "pet_ember",   Name = "Ember",     Rarity = "Épico",     Weight = 55, Color = Color3.fromRGB(255, 140, 60) },
+			{ Id = "pet_magmoo",  Name = "Magmoo",    Rarity = "Legendario",Weight = 30, Color = Color3.fromRGB(255, 80, 30) },
+			{ Id = "pet_core",    Name = "Núcleo",    Rarity = "Mítico",    Weight = 12, Color = Color3.fromRGB(255, 40, 90) },
+			{ Id = "pet_infernus",Name = "Infernus",  Rarity = "Secreto",   Weight = 3,  Color = Color3.fromRGB(255, 255, 255) },
+		},
+	},
+	{
+		Id = "prism", Name = "HUEVO PRISMA", Price = 6000,
+		Color = Color3.fromRGB(190, 110, 255), Accent = Color3.fromRGB(90, 30, 190),
+		Rewards = {
+			{ Id = "pet_crystal", Name = "Cristal",   Rarity = "Legendario",Weight = 52, Color = Color3.fromRGB(170, 230, 255) },
+			{ Id = "pet_aurora",  Name = "Aurora",    Rarity = "Mítico",    Weight = 33, Color = Color3.fromRGB(255, 150, 255) },
+			{ Id = "pet_studgod", Name = "Stud God",  Rarity = "Secreto",   Weight = 15, Color = Color3.fromRGB(255, 240, 150) },
+		},
+	},
+}
+
+Config.RarityColors = {
+	["Común"]      = Color3.fromRGB(190, 200, 210),
+	["Raro"]       = Color3.fromRGB(80, 190, 255),
+	["Épico"]      = Color3.fromRGB(190, 110, 255),
+	["Legendario"] = Color3.fromRGB(255, 200, 50),
+	["Mítico"]     = Color3.fromRGB(255, 90, 160),
+	["Secreto"]    = Color3.fromRGB(255, 255, 255),
+}
+
+-- ───────────────────────────────── EVENTOS DE LOBBY ──────────────────────────
+Config.LobbyEvents = {
+	Interval = 150,  -- s entre eventos
+	Duration = 45,   -- s que dura cada evento
+	List = {
+		{ Id = "coinrain", Name = "LLUVIA DE MONEDAS", Desc = "Recoge studs dorados que caen del cielo",
+		  Color = Color3.fromRGB(255, 205, 55),  Ambient = "gold" },
+		{ Id = "eggfest",  Name = "FIESTA DE HUEVOS",  Desc = "Huevos a mitad de precio",
+		  Color = Color3.fromRGB(120, 255, 170), Ambient = "green" },
+		{ Id = "storm",    Name = "TORMENTA STUD",     Desc = "Rayos constantes sobre el lobby",
+		  Color = Color3.fromRGB(0, 225, 255),   Ambient = "storm" },
+		{ Id = "disco",    Name = "FIESTA NEÓN",       Desc = "El lobby cambia de color al ritmo",
+		  Color = Color3.fromRGB(255, 80, 220),  Ambient = "disco" },
+	},
+}
+
+-- ───────────────────────────────── LOBBY (geometría) ─────────────────────────
+Config.Lobby = {
+	Origin      = Vector3.new(0, 0, 0),
+	FloorSize   = Vector3.new(440, 4, 320),
+	TileSize    = 40,
+	WallHeight  = 14,
+	SpawnZ      = 118,          -- zona de aparición (sur)
+	BoardsZ     = -132,         -- zona de leaderboards (norte)
+	ShopX       = 168,          -- tiendas laterales
+	EggZone     = Vector3.new(-96, 0, -48),
+	EventStage  = Vector3.new(104, 0, -40),
+	MapOrigin   = Vector3.new(0, 1200, 0), -- los mapas se construyen muy lejos del lobby
+}
+
+return Config
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX12">
+      <Properties>
+        <string name="Name">Format</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	Format.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Format   (ModuleScript)
+
+	Formateo de números, tiempo y texto para UI y leaderboards.
+]]
+
+local Format = {}
+
+--- 1234567 -> "1,234,567"
+function Format.comma(n: number): string
+	local s = tostring(math.floor(n))
+	local sign = ""
+	if s:sub(1, 1) == "-" then sign, s = "-", s:sub(2) end
+	local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+	out = out:gsub("^,", "")
+	return sign .. out
+end
+
+--- 1534 -> "1.5K" / 2400000 -> "2.4M"
+function Format.short(n: number): string
+	local abs = math.abs(n)
+	if abs >= 1e9 then return string.format("%.1fB", n / 1e9) end
+	if abs >= 1e6 then return string.format("%.1fM", n / 1e6) end
+	if abs >= 1e3 then return string.format("%.1fK", n / 1e3) end
+	return tostring(math.floor(n))
+end
+
+--- Segundos -> "12h 34m"
+function Format.hours(seconds: number): string
+	seconds = math.max(0, math.floor(seconds))
+	local h = math.floor(seconds / 3600)
+	local m = math.floor((seconds % 3600) / 60)
+	if h >= 1000 then
+		return Format.comma(h) .. "h"
+	end
+	return string.format("%dh %02dm", h, m)
+end
+
+--- Segundos -> "02:35"
+function Format.clock(seconds: number): string
+	seconds = math.max(0, math.floor(seconds))
+	return string.format("%02d:%02d", math.floor(seconds / 60), seconds % 60)
+end
+
+--- 1 -> "#1"
+function Format.rank(n: number): string
+	return "#" .. tostring(n)
+end
+
+--- Escapa texto de usuario para RichText (evita inyección de etiquetas).
+function Format.escapeRich(text: string): string
+	text = text:gsub("&", "&amp;")
+	text = text:gsub("<", "&lt;")
+	text = text:gsub(">", "&gt;")
+	text = text:gsub('"', "&quot;")
+	return text
+end
+
+--- Color3 -> "rgb(255,0,0)" para RichText
+function Format.richColor(c: Color3): string
+	return string.format("rgb(%d,%d,%d)", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+
+--- Envuelve texto en una etiqueta de color RichText.
+function Format.colored(text: string, color: Color3, bold: boolean?): string
+	local inner = bold and ("<b>" .. text .. "</b>") or text
+	return string.format('<font color="%s">%s</font>', Format.richColor(color), inner)
+end
+
+return Format
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX13">
+      <Properties>
+        <string name="Name">Net</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	Net.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Net   (ModuleScript)
+
+	Capa de red mínima: crea (servidor) y resuelve (cliente) los Remotes dentro
+	de ReplicatedStorage/Remotes. Un único punto de verdad para los nombres.
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Net = {}
+
+Net.EventNames = {
+	"SpawnVFX",     -- S->C : reproducir rayo + impacto en una posición
+	"RoundState",   -- S->C : estado del ciclo de rondas + temporizador
+	"VoteOptions",  -- S->C : mapas candidatos
+	"VoteTally",    -- S->C : conteo de votos
+	"CastVote",     -- C->S : votar un mapa
+	"Announce",     -- S->C : banner grande en pantalla
+	"SystemChat",   -- S->C : mensaje de sistema con RichText en el chat
+	"DataSync",     -- S->C : snapshot de datos del jugador
+	"EggVFX",       -- S->C : efecto de apertura de huevo (para los de alrededor)
+	"CombatVFX",    -- S->C : disparo del blaster
+	"LobbyEvent",   -- S->C : evento dinámico del lobby
+	"KillFeed",     -- S->C : feed de eliminaciones
+	"ClientReady",  -- C->S : la pantalla de carga terminó, cargar personaje
+	"Toast",        -- S->C : notificación pequeña
+}
+
+Net.FunctionNames = {
+	"Purchase",     -- C->S : comprar en tienda
+	"OpenEgg",      -- C->S : abrir huevo (servidor decide la recompensa)
+	"GetBootInfo",  -- C->S : estado de carga del mundo + datos iniciales
+	"GetLeaderboard", -- C->S : copia cacheada de un Top 100
+}
+
+local folder: Folder? = nil
+
+--- Servidor: crea la carpeta Remotes y todos los objetos.
+function Net.Init()
+	assert(RunService:IsServer(), "Net.Init solo se llama en el servidor")
+	local f = ReplicatedStorage:FindFirstChild("Remotes")
+	if not f then
+		f = Instance.new("Folder")
+		f.Name = "Remotes"
+		f.Parent = ReplicatedStorage
+	end
+	for _, name in ipairs(Net.EventNames) do
+		if not f:FindFirstChild(name) then
+			local e = Instance.new("RemoteEvent")
+			e.Name = name
+			e.Parent = f
+		end
+	end
+	for _, name in ipairs(Net.FunctionNames) do
+		if not f:FindFirstChild(name) then
+			local e = Instance.new("RemoteFunction")
+			e.Name = name
+			e.Parent = f
+		end
+	end
+	folder = f
+	return f
+end
+
+local function getFolder(): Folder
+	if folder then return folder end
+	folder = ReplicatedStorage:WaitForChild("Remotes", 30) :: Folder
+	return folder
+end
+
+function Net.Event(name: string): RemoteEvent
+	return getFolder():WaitForChild(name, 20) :: RemoteEvent
+end
+
+function Net.Func(name: string): RemoteFunction
+	return getFolder():WaitForChild(name, 20) :: RemoteFunction
+end
+
+--- Atajo servidor: dispara a todos salvo a uno.
+function Net.FireAllExcept(name: string, except: Player, ...)
+	local Players = game:GetService("Players")
+	local ev = Net.Event(name)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= except then
+			ev:FireClient(p, ...)
+		end
+	end
+end
+
+return Net
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX14">
+      <Properties>
+        <string name="Name">Palette</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	Palette.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Palette   (ModuleScript)
+
+	Paleta vibrante y utilidades de color (variación de tono, mezcla, gradientes).
+	Todos los colores del lobby, árboles y mapas salen de aquí para mantener
+	una estética equilibrada.
+]]
+
+local Palette = {}
+
+local C3 = Color3.fromRGB
+
+-- Colores base vivos
+Palette.Lime      = C3(154, 255, 60)
+Palette.Turquoise = C3(0, 226, 205)
+Palette.Orange    = C3(255, 146, 30)
+Palette.Yellow    = C3(255, 215, 50)
+Palette.Magenta   = C3(255, 70, 190)
+Palette.Violet    = C3(165, 90, 255)
+Palette.Cyan      = C3(0, 205, 255)
+Palette.Red       = C3(255, 75, 95)
+Palette.Blue      = C3(70, 130, 255)
+Palette.Green     = C3(60, 210, 110)
+Palette.White     = C3(248, 250, 255)
+Palette.Ink       = C3(28, 32, 48)
+Palette.Deep      = C3(18, 20, 34)
+Palette.Gold      = C3(255, 199, 44)
+Palette.Silver    = C3(208, 216, 230)
+Palette.Bronze    = C3(205, 127, 50)
+
+-- Copas de árbol (lo que pidió el brief: lima, turquesa, naranja, amarillo, magenta, violeta)
+Palette.Canopy = {
+	Palette.Lime, Palette.Turquoise, Palette.Orange,
+	Palette.Yellow, Palette.Magenta, Palette.Violet,
+	C3(120, 255, 190), C3(255, 110, 120),
+}
+
+-- Troncos
+Palette.Trunk = {
+	C3(126, 84, 56), C3(96, 70, 52), C3(150, 104, 70), C3(84, 64, 96),
+}
+
+-- Suelo del lobby (damero suave)
+Palette.FloorA = C3(74, 198, 255)
+Palette.FloorB = C3(56, 168, 232)
+Palette.PathA  = C3(255, 221, 102)
+Palette.PathB  = C3(255, 196, 70)
+Palette.Grass  = C3(96, 220, 120)
+Palette.GrassAlt = C3(76, 198, 106)
+
+-- Acentos neón
+Palette.Neon = { Palette.Cyan, Palette.Magenta, Palette.Lime, Palette.Yellow, Palette.Violet }
+
+--- Devuelve un elemento aleatorio de una lista de colores.
+function Palette.pick(list: { Color3 }, rng: Random?): Color3
+	local r = rng or Random.new()
+	return list[r:NextInteger(1, #list)]
+end
+
+--- Varía un color en HSV (tono/saturación/brillo) para dar riqueza sin romper la armonía.
+function Palette.vary(color: Color3, hueAmt: number?, satAmt: number?, valAmt: number?, rng: Random?): Color3
+	local r = rng or Random.new()
+	local h, s, v = color:ToHSV()
+	h = (h + r:NextNumber(-(hueAmt or 0.03), hueAmt or 0.03)) % 1
+	s = math.clamp(s + r:NextNumber(-(satAmt or 0.08), satAmt or 0.08), 0, 1)
+	v = math.clamp(v + r:NextNumber(-(valAmt or 0.10), valAmt or 0.10), 0.08, 1)
+	return Color3.fromHSV(h, s, v)
+end
+
+--- Mezcla lineal entre dos colores.
+function Palette.mix(a: Color3, b: Color3, t: number): Color3
+	return a:Lerp(b, math.clamp(t, 0, 1))
+end
+
+--- Versión más oscura (para bordes/sombras stud).
+function Palette.darken(color: Color3, amount: number?): Color3
+	local h, s, v = color:ToHSV()
+	return Color3.fromHSV(h, math.min(1, s + 0.05), math.max(0.05, v - (amount or 0.25)))
+end
+
+--- Versión más clara (para brillos/neón).
+function Palette.lighten(color: Color3, amount: number?): Color3
+	local h, s, v = color:ToHSV()
+	return Color3.fromHSV(h, math.max(0, s - 0.10), math.min(1, v + (amount or 0.22)))
+end
+
+--- Color de rango para el Top 3 físico y títulos.
+function Palette.rankColor(rank: number): Color3
+	if rank == 1 then return Palette.Gold end
+	if rank == 2 then return Palette.Silver end
+	if rank == 3 then return Palette.Bronze end
+	return C3(120, 132, 158)
+end
+
+--- Arcoíris determinista (para gradientes de UI y eventos neón).
+function Palette.rainbow(t: number): Color3
+	return Color3.fromHSV(t % 1, 0.85, 1)
+end
+
+return Palette
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX15">
+      <Properties>
+        <string name="Name">StudMaterial</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	StudMaterial.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > StudMaterial   (ModuleScript)
+
+	NOTA TÉCNICA IMPORTANTE
+	-----------------------
+	El motor actual de Roblox NO expone `Enum.Material.Stud` como material.
+	El look clásico de "studs" se consigue con `Enum.SurfaceType.Studs` en las
+	6 caras de la parte (sigue existiendo en el motor aunque ya no aparezca en
+	el panel de propiedades desde 2019).
+
+	Este módulo resuelve el material "Stud" de forma segura y en este orden:
+	  1) Enum.Material.Stud          -> si tu versión del motor lo expone (pcall)
+	  2) MaterialVariant "Stud"      -> si creaste un MaterialVariant con ese nombre
+	  3) Plastic + SurfaceType.Studs -> studs AUTÉNTICOS del motor (por defecto)
+
+	Así el 100% del juego mantiene la estética Stud pedida, sin romperse nunca.
+]]
+
+local MaterialService = game:GetService("MaterialService")
+
+local StudMaterial = {}
+
+-- 1) ¿Existe Enum.Material.Stud en este motor?
+local okEnum, enumStud = pcall(function()
+	return (Enum.Material :: any).Stud
+end)
+
+StudMaterial.HasNativeStudMaterial = okEnum and typeof(enumStud) == "EnumItem"
+StudMaterial.Material = StudMaterial.HasNativeStudMaterial and enumStud or Enum.Material.Plastic
+
+-- 2) ¿Hay un MaterialVariant llamado "Stud"? (opcional, para texturas HD de studs)
+StudMaterial.Variant = ""
+do
+	local ok = pcall(function()
+		for _, child in ipairs(MaterialService:GetChildren()) do
+			if child:IsA("MaterialVariant") and child.Name == "Stud" then
+				StudMaterial.Variant = "Stud"
+			end
+		end
+	end)
+	if not ok then StudMaterial.Variant = "" end
+end
+
+local STUDS = Enum.SurfaceType.Studs
+local SMOOTH = Enum.SurfaceType.Smooth
+
+local SURFACE_PROPS = { "TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface" }
+
+--- Aplica los studs reales a las 6 caras de una parte.
+function StudMaterial.apply(part: BasePart, faces: { string }?)
+	if not part:IsA("BasePart") then return end
+
+	-- No ponemos studs en neón / vidrio / fuerza: arruina el brillo limpio.
+	local m = part.Material
+	if m == Enum.Material.Neon or m == Enum.Material.Glass or m == Enum.Material.ForceField then
+		StudMaterial.smooth(part)
+		return
+	end
+
+	if m == Enum.Material.Plastic or m == StudMaterial.Material then
+		part.Material = StudMaterial.Material
+		if StudMaterial.Variant ~= "" then
+			pcall(function() part.MaterialVariant = StudMaterial.Variant end)
+		end
+	end
+
+	local list = faces or SURFACE_PROPS
+	for _, prop in ipairs(list) do
+		pcall(function() (part :: any)[prop] = STUDS end)
+	end
+end
+
+--- Deja todas las caras lisas (neón, cristal, detalles finos).
+function StudMaterial.smooth(part: BasePart)
+	for _, prop in ipairs(SURFACE_PROPS) do
+		pcall(function() (part :: any)[prop] = SMOOTH end)
+	end
+end
+
+--- Studs solo arriba (suelos/caminos: menos ruido visual, mismo estilo).
+function StudMaterial.applyTop(part: BasePart)
+	StudMaterial.smooth(part)
+	part.Material = StudMaterial.Material
+	part.TopSurface = STUDS
+end
+
+--- Convierte un modelo entero al estilo Stud.
+function StudMaterial.applyToModel(model: Instance)
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			StudMaterial.apply(d)
+		end
+	end
+end
+
+return StudMaterial
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX16">
+      <Properties>
+        <string name="Name">Titles</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	Titles.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > Titles   (ModuleScript)
+
+	Definición de los títulos 3D exclusivos del Top 1 / 2 / 3 de cada categoría,
+	más el título genérico de Top 100. Cada entrada define texto, gradiente
+	(UIGradient), color de borde (UIStroke) y si lleva brillo animado.
+]]
+
+local Titles = {}
+
+local C3 = Color3.fromRGB
+
+Titles.Definitions = {
+	Kills = {
+		[1] = { Text = "☠ VERDUGO SUPREMO",  A = C3(255, 70, 70),  B = C3(255, 210, 60),  Stroke = C3(90, 10, 10),  Glow = true },
+		[2] = { Text = "⚔ CAZADOR DE ÉLITE", A = C3(255, 150, 120), B = C3(230, 235, 255), Stroke = C3(70, 30, 30) },
+		[3] = { Text = "🔥 DEPREDADOR",      A = C3(255, 120, 60),  B = C3(205, 127, 50),  Stroke = C3(70, 35, 10) },
+	},
+	Streak = {
+		[1] = { Text = "⚡ RACHA IMPARABLE",  A = C3(0, 240, 255),  B = C3(170, 110, 255), Stroke = C3(8, 40, 70),  Glow = true },
+		[2] = { Text = "✦ INVICTO",          A = C3(120, 220, 255), B = C3(235, 245, 255), Stroke = C3(15, 45, 70) },
+		[3] = { Text = "◆ EN LLAMAS",        A = C3(80, 200, 220),  B = C3(205, 127, 50),  Stroke = C3(20, 50, 60) },
+	},
+	Playtime = {
+		[1] = { Text = "⏳ LEYENDA ETERNA",   A = C3(190, 110, 255), B = C3(255, 205, 55),  Stroke = C3(45, 15, 75), Glow = true },
+		[2] = { Text = "★ VETERANO",         A = C3(200, 170, 255), B = C3(235, 240, 255), Stroke = C3(45, 25, 75) },
+		[3] = { Text = "✧ HABITUAL",         A = C3(170, 150, 230), B = C3(205, 127, 50),  Stroke = C3(40, 25, 60) },
+	},
+}
+
+Titles.Top100 = { Text = "◈ TOP 100", A = C3(120, 255, 180), B = C3(0, 210, 255), Stroke = C3(10, 50, 45) }
+
+Titles.CategoryNames = {
+	Kills = "KILLS",
+	Streak = "RACHA",
+	Playtime = "HORAS JUGADAS",
+}
+
+--- Devuelve la definición de título para una categoría y puesto (nil si > 3).
+function Titles.Get(category: string, rank: number)
+	local cat = Titles.Definitions[category]
+	if not cat then return nil end
+	return cat[rank]
+end
+
+--- Elige el mejor título disponible entre varias categorías.
+-- ranks = { Kills = 2, Streak = 57, Playtime = 1 }
+function Titles.Best(ranks: { [string]: number })
+	local bestDef, bestRank, bestCat = nil, 999, nil
+	for category, rank in pairs(ranks) do
+		if rank and rank <= 3 and rank < bestRank then
+			local def = Titles.Get(category, rank)
+			if def then
+				bestDef, bestRank, bestCat = def, rank, category
+			end
+		end
+	end
+	return bestDef, bestCat, bestRank
+end
+
+return Titles
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX17">
+      <Properties>
+        <string name="Name">TreeGenerator</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	TreeGenerator.lua
+	Ubicación en Roblox: ReplicatedStorage > Shared > TreeGenerator   (ModuleScript)
+
+	Generador procedural de árboles estilo Stud.
+	5 arquetipos geométricos × colores vibrantes × variación de tono y escala.
+	Cada árbol usa entre 4 y 11 partes (presupuesto de FPS controlado).
+]]
+
+local Build = require(script.Parent.Build)
+local Palette = require(script.Parent.Palette)
+
+local TreeGenerator = {}
+
+export type TreeOptions = {
+	Seed: number?,
+	Scale: number?,
+	Color: Color3?,
+	Variant: string?,
+	Glow: boolean?,
+}
+
+local VARIANTS = { "cone", "cubes", "orb", "layers", "spiral" }
+
+local function trunk(parent: Instance, base: CFrame, height: number, thickness: number, rng: Random): CFrame
+	local color = Palette.vary(Palette.pick(Palette.Trunk, rng), 0.02, 0.06, 0.08, rng)
+	Build.part({
+		Name = "Trunk",
+		Size = Vector3.new(thickness, height, thickness),
+		Color = color,
+		CFrame = base * CFrame.new(0, height / 2, 0),
+		Shadow = true,
+	}, parent)
+	return base * CFrame.new(0, height, 0)
+end
+
+--- Copa cónica: cubos decrecientes rotados (clásico stud).
+local function canopyCone(parent, top: CFrame, scale: number, color: Color3, rng: Random)
+	local layers = rng:NextInteger(3, 4)
+	for i = 1, layers do
+		local t = (i - 1) / layers
+		local w = (12 - i * 2.4) * scale
+		Build.part({
+			Name = "Canopy",
+			Size = Vector3.new(w, 3.2 * scale, w),
+			Color = Palette.vary(color, 0.025, 0.08, 0.10 - t * 0.04, rng),
+			CFrame = top * CFrame.new(0, (i - 0.5) * 3.0 * scale, 0) * CFrame.Angles(0, math.rad(rng:NextNumber(-25, 25)), 0),
+			CanCollide = false,
+			Shadow = i == 1,
+		}, parent)
+	end
+end
+
+--- Copa de cubos sueltos (estilo juguete).
+local function canopyCubes(parent, top: CFrame, scale: number, color: Color3, rng: Random)
+	local count = rng:NextInteger(4, 6)
+	for i = 1, count do
+		local ang = (i / count) * math.pi * 2 + rng:NextNumber(-0.3, 0.3)
+		local r = rng:NextNumber(1.6, 4.2) * scale
+		local size = rng:NextNumber(4.5, 7.5) * scale
+		Build.part({
+			Name = "Canopy",
+			Size = Vector3.new(size, size * 0.8, size),
+			Color = Palette.vary(color, 0.04, 0.10, 0.12, rng),
+			CFrame = top * CFrame.new(math.cos(ang) * r, rng:NextNumber(1.5, 5) * scale, math.sin(ang) * r)
+				* CFrame.Angles(0, math.rad(rng:NextNumber(0, 90)), 0),
+			CanCollide = false,
+		}, parent)
+	end
+end
+
+--- Copa esférica (mesh sphere para escala no uniforme).
+local function canopyOrb(parent, top: CFrame, scale: number, color: Color3, rng: Random)
+	local d = rng:NextNumber(10, 14) * scale
+	Build.part({
+		Name = "Canopy",
+		Size = Vector3.new(d, d * rng:NextNumber(0.75, 1.05), d),
+		Color = Palette.vary(color, 0.03, 0.08, 0.10, rng),
+		CFrame = top * CFrame.new(0, d * 0.45, 0),
+		CanCollide = false,
+		Shape = Enum.PartType.Ball,
+		Shadow = true,
+	}, parent)
+	Build.part({
+		Name = "CanopyTop",
+		Size = Vector3.new(d * 0.55, d * 0.5, d * 0.55),
+		Color = Palette.lighten(color, 0.12),
+		CFrame = top * CFrame.new(rng:NextNumber(-1, 1), d * 0.85, rng:NextNumber(-1, 1)),
+		CanCollide = false,
+		Shape = Enum.PartType.Ball,
+	}, parent)
+end
+
+--- Copa en losas apiladas y giradas.
+local function canopyLayers(parent, top: CFrame, scale: number, color: Color3, rng: Random)
+	local layers = rng:NextInteger(3, 4)
+	for i = 1, layers do
+		local w = (14 - i * 2.6) * scale
+		Build.part({
+			Name = "Canopy",
+			Size = Vector3.new(w, 1.8 * scale, w),
+			Color = Palette.vary(color, 0.05, 0.10, 0.14, rng),
+			CFrame = top * CFrame.new(0, (i - 0.5) * 2.6 * scale, 0) * CFrame.Angles(0, math.rad(i * 22), 0),
+			CanCollide = false,
+		}, parent)
+	end
+end
+
+--- Copa en espiral ascendente (muy vistosa en el lobby).
+local function canopySpiral(parent, top: CFrame, scale: number, color: Color3, rng: Random)
+	local steps = rng:NextInteger(5, 7)
+	for i = 1, steps do
+		local t = i / steps
+		local ang = t * math.pi * 3
+		local w = (9 - t * 5) * scale
+		Build.part({
+			Name = "Canopy",
+			Size = Vector3.new(w, 2 * scale, w),
+			Color = Palette.mix(color, Palette.lighten(color, 0.25), t),
+			CFrame = top * CFrame.new(math.cos(ang) * 2.2 * scale, i * 2.1 * scale, math.sin(ang) * 2.2 * scale)
+				* CFrame.Angles(0, -ang, 0),
+			CanCollide = false,
+		}, parent)
+	end
+end
+
+local CANOPIES = {
+	cone = canopyCone, cubes = canopyCubes, orb = canopyOrb,
+	layers = canopyLayers, spiral = canopySpiral,
+}
+
+--- Crea un árbol Stud en `position`.
+function TreeGenerator.create(position: Vector3, parent: Instance?, options: TreeOptions?): Model
+	local opt = options or {}
+	local rng = Random.new(opt.Seed or (os.clock() * 1e6) % 2147483647)
+	local scale = opt.Scale or rng:NextNumber(0.75, 1.45)
+	local variant = opt.Variant or VARIANTS[rng:NextInteger(1, #VARIANTS)]
+	local color = opt.Color or Palette.pick(Palette.Canopy, rng)
+
+	local model = Build.model("StudTree_" .. variant, parent)
+	model:SetAttribute("Variant", variant)
+
+	local base = CFrame.new(position) * CFrame.Angles(0, rng:NextNumber(0, math.pi * 2), 0)
+	local trunkHeight = rng:NextNumber(7, 13) * scale
+	local top = trunk(model, base, trunkHeight, rng:NextNumber(1.6, 2.6) * scale, rng)
+
+	local fn = CANOPIES[variant] or canopyCone
+	fn(model, top, scale, color, rng)
+
+	-- Brillo opcional: una baya neón que ilumina de noche sin costar FPS.
+	if opt.Glow or rng:NextNumber() < 0.28 then
+		local orb = Build.neon({
+			Name = "Glow",
+			Size = Vector3.new(1.6, 1.6, 1.6),
+			Color = Palette.lighten(color, 0.3),
+			CFrame = top * CFrame.new(rng:NextNumber(-3, 3), rng:NextNumber(2, 6) * scale, rng:NextNumber(-3, 3)),
+			CanCollide = false,
+			Shape = Enum.PartType.Ball,
+		}, model)
+		Build.light(orb, color, 16, 1.6)
+	end
+
+	local primary = model:FindFirstChild("Trunk")
+	if primary and primary:IsA("BasePart") then
+		model.PrimaryPart = primary
+	end
+	return model
+end
+
+--- Siembra un bosque evitando una zona central (plazas) y respetando un presupuesto.
+function TreeGenerator.forest(parent: Instance, opts: {
+	Count: number, Center: Vector3, RangeX: number, RangeZ: number,
+	Avoid: { { Pos: Vector3, Radius: number } }?, Seed: number?, Y: number?,
+}): Folder
+	local folder = Build.folder("StudTrees", parent)
+	local rng = Random.new(opts.Seed or 20261124)
+	local placed = {}
+	local attempts = 0
+	local y = opts.Y or 0
+
+	while #placed < opts.Count and attempts < opts.Count * 14 do
+		attempts += 1
+		local pos = Vector3.new(
+			opts.Center.X + rng:NextNumber(-opts.RangeX, opts.RangeX),
+			y,
+			opts.Center.Z + rng:NextNumber(-opts.RangeZ, opts.RangeZ)
+		)
+
+		local ok = true
+		if opts.Avoid then
+			for _, zone in ipairs(opts.Avoid) do
+				if (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(zone.Pos.X, 0, zone.Pos.Z)).Magnitude < zone.Radius then
+					ok = false
+					break
+				end
+			end
+		end
+		if ok then
+			for _, other in ipairs(placed) do
+				if (pos - other).Magnitude < 17 then ok = false break end
+			end
+		end
+
+		if ok then
+			table.insert(placed, pos)
+			TreeGenerator.create(pos, folder, { Seed = rng:NextInteger(1, 1e8) })
+		end
+	end
+	return folder
+end
+
+return TreeGenerator
+]]></ProtectedString>
+      </Properties>
+    </Item>
+
+  </Item>
+</roblox>

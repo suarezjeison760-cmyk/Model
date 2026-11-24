@@ -1,0 +1,2116 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="Folder" referent="RBX34">
+    <Properties>
+      <string name="Name">Client</string>
+    </Properties>
+    <Item class="ModuleScript" referent="RBX35">
+      <Properties>
+        <string name="Name">BoardController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	BoardController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > BoardController   (ModuleScript)
+
+	Los SurfaceGui de los tableros Top 100 son interactivos (Active = true), pero
+	los eventos de botón solo existen en el cliente: aquí se conectan las flechas
+	▲ / ▼ para recorrer los 100 puestos con un desplazamiento suave.
+]]
+
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local BoardController = {}
+
+local PAGE = 5 * 56 -- 5 filas por pulsación
+
+local function wireBoard(screen: BasePart)
+	local gui = screen:FindFirstChild("BoardGui")
+	if not gui or not gui:IsA("SurfaceGui") then return end
+	local bg = gui:FindFirstChild("BG")
+	if not bg then return end
+
+	local list = bg:FindFirstChild("List")
+	local up = bg:FindFirstChild("PageUp")
+	local down = bg:FindFirstChild("PageDown")
+	if not (list and list:IsA("ScrollingFrame") and up and down) then return end
+
+	local function scroll(delta: number)
+		local maxY = math.max(0, list.AbsoluteCanvasSize.Y - list.AbsoluteWindowSize.Y)
+		local target = math.clamp(list.CanvasPosition.Y + delta, 0, maxY)
+		TweenService:Create(list, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+			CanvasPosition = Vector2.new(0, target),
+		}):Play()
+	end
+
+	;(up :: TextButton).MouseButton1Click:Connect(function() scroll(-PAGE) end)
+	;(down :: TextButton).MouseButton1Click:Connect(function() scroll(PAGE) end)
+end
+
+function BoardController.Init()
+	task.spawn(function()
+		local lobby = Workspace:WaitForChild("Lobby", 60)
+		if not lobby then return end
+		local boards = lobby:WaitForChild("Leaderboards", 60)
+		if not boards then return end
+
+		local function hook(model: Instance)
+			local screen = model:FindFirstChild("Screen")
+			if screen and screen:IsA("BasePart") then
+				-- el SurfaceGui puede llegar un instante después por replicación
+				task.spawn(function()
+					for _ = 1, 20 do
+						if screen:FindFirstChild("BoardGui") then
+							wireBoard(screen)
+							return
+						end
+						task.wait(0.5)
+					end
+				end)
+			end
+		end
+
+		for _, model in ipairs(boards:GetChildren()) do hook(model) end
+		boards.ChildAdded:Connect(hook)
+	end)
+end
+
+return BoardController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX36">
+      <Properties>
+        <string name="Name">CameraShake</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	CameraShake.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > CameraShake   (ModuleScript)
+
+	Sacudida de cámara sutil mediante Humanoid.CameraOffset.
+	La conexión a RenderStepped vive SOLO mientras dura la sacudida (< 0.5 s)
+	y se desconecta sola: nada de bucles permanentes por frame.
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local CameraShake = {}
+
+local player = Players.LocalPlayer
+local active: RBXScriptConnection? = nil
+local seed = math.random() * 1000
+
+local function getHumanoid(): Humanoid?
+	local character = player.Character
+	return character and character:FindFirstChildOfClass("Humanoid") or nil
+end
+
+--- intensity: studs de desplazamiento máximo · duration: segundos
+function CameraShake.Shake(intensity: number, duration: number)
+	local humanoid = getHumanoid()
+	if not humanoid then return end
+
+	if active then
+		active:Disconnect()
+		active = nil
+	end
+
+	local t0 = os.clock()
+	seed += 13.7
+
+	active = RunService.RenderStepped:Connect(function()
+		local humanoid2 = getHumanoid()
+		if not humanoid2 then
+			if active then active:Disconnect() active = nil end
+			return
+		end
+
+		local elapsed = os.clock() - t0
+		if elapsed >= duration then
+			humanoid2.CameraOffset = Vector3.zero
+			if active then active:Disconnect() active = nil end
+			return
+		end
+
+		local falloff = 1 - (elapsed / duration)
+		local t = elapsed * 26
+		humanoid2.CameraOffset = Vector3.new(
+			math.noise(t, seed) * intensity * falloff,
+			math.noise(seed, t) * intensity * falloff,
+			math.noise(t, t, seed) * intensity * falloff * 0.5
+		)
+	end)
+end
+
+--- Sacudida proporcional a la distancia (más cerca = más fuerte, 0 si lejos).
+function CameraShake.ShakeAt(position: Vector3, maxDistance: number, intensity: number, duration: number)
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not root then return end
+
+	local distance = (root.Position - position).Magnitude
+	if distance > maxDistance then return end
+
+	local scale = 1 - (distance / maxDistance)
+	CameraShake.Shake(intensity * scale, duration)
+end
+
+return CameraShake
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX37">
+      <Properties>
+        <string name="Name">ChatController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	ChatController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > ChatController   (ModuleScript)
+
+	Pinta los mensajes de sistema que manda el servidor (RemoteEvent "SystemChat")
+	en el chat con RichText usando TextChatService:
+	TextChannels.RBXGeneral:DisplaySystemMessage(texto)
+
+	Incluye respaldo para el chat legado (StarterGui:SetCore).
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local TextChatService = game:GetService("TextChatService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Net = require(Shared.Net)
+
+local ChatController = {}
+
+local function stripRich(text: string): string
+	local out = text:gsub("<[^>]->", "")
+	out = out:gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&quot;", '"'):gsub("&amp;", "&")
+	return out
+end
+
+local function getGeneralChannel(): TextChannel?
+	local channels = TextChatService:FindFirstChild("TextChannels")
+	if not channels then return nil end
+	local general = channels:FindFirstChild("RBXGeneral")
+	if general and general:IsA("TextChannel") then
+		return general
+	end
+	for _, child in ipairs(channels:GetChildren()) do
+		if child:IsA("TextChannel") then return child end
+	end
+	return nil
+end
+
+function ChatController.Display(text: string)
+	local channel = getGeneralChannel()
+	if channel then
+		local ok = pcall(function()
+			channel:DisplaySystemMessage(text)
+		end)
+		if ok then return end
+	end
+
+	-- Respaldo: chat legado (sin RichText)
+	pcall(function()
+		StarterGui:SetCore("ChatMakeSystemMessage", {
+			Text = stripRich(text),
+			Color = Color3.fromRGB(255, 205, 55),
+			Font = Enum.Font.SourceSansBold,
+			TextSize = 20,
+		})
+	end)
+end
+
+function ChatController.Init()
+	Net.Event("SystemChat").OnClientEvent:Connect(function(payload)
+		if typeof(payload) == "table" and typeof(payload.Text) == "string" then
+			ChatController.Display(payload.Text)
+		end
+	end)
+end
+
+return ChatController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX38">
+      <Properties>
+        <string name="Name">EggController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	EggController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > EggController   (ModuleScript)
+
+	Panel del huevo + secuencia de apertura sincronizada:
+	el servidor decide la recompensa (RemoteFunction "OpenEgg") y el cliente
+	reproduce temblor → rotación → destello → partículas → carta de recompensa.
+]]
+
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Format = require(Shared.Format)
+local Net = require(Shared.Net)
+
+local UI = require(script.Parent.UI)
+local HUDController = require(script.Parent.HUDController)
+
+local EggController = {}
+
+local gui: ScreenGui
+local panel: Frame
+local titleLabel, priceLabel, rarityLabel: TextLabel
+local openButton: TextButton
+local currentEgg: any = nil
+local busy = false
+
+local function close()
+	UI.tween(panel, { Position = UDim2.new(0.5, 0, 1.4, 0) }, 0.3)
+	task.delay(0.32, function() panel.Visible = false end)
+end
+
+-- ─────────────────── CARTA DE RECOMPENSA ────────────────────────────────────
+local function showReward(reward)
+	local rarityColor = Config.RarityColors[reward.Rarity] or UI.Colors.Text
+
+	local card = UI.panel({
+		Parent = gui, Size = UDim2.new(0, 360, 0, 240),
+		Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
+		StrokeColor = rarityColor, StrokeThickness = 3, Radius = 18,
+	})
+	card.BackgroundTransparency = 0.03
+
+	local glow = UI.new("Frame", {
+		Parent = card, Size = UDim2.new(1, 0, 0, 90), BackgroundColor3 = rarityColor,
+		BackgroundTransparency = 0.72, BorderSizePixel = 0,
+	})
+	UI.corner(glow, 18)
+
+	UI.label({
+		Parent = card, Text = reward.Rarity:upper(), TextSize = 20,
+		Size = UDim2.new(1, 0, 0, 28), Position = UDim2.new(0, 0, 0, 16),
+		TextColor3 = rarityColor,
+	})
+	UI.label({
+		Parent = card, Text = reward.Name, TextSize = 40,
+		Size = UDim2.new(1, -20, 0, 54), Position = UDim2.new(0, 10, 0, 56),
+		TextColor3 = UI.Colors.Text, StrokeThickness = 3,
+	})
+
+	local orb = UI.new("Frame", {
+		Parent = card, Size = UDim2.new(0, 86, 0, 86),
+		Position = UDim2.new(0.5, 0, 0, 128), AnchorPoint = Vector2.new(0.5, 0),
+		BackgroundColor3 = reward.Color or rarityColor, BorderSizePixel = 0,
+	})
+	UI.corner(orb, 999)
+	UI.stroke(orb, UI.Colors.Text, 3, 0.2)
+
+	UI.label({
+		Parent = card, Text = "¡añadido a tus mascotas!", TextSize = 14, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, 0, 0, 20), Position = UDim2.new(0, 0, 1, -26), TextColor3 = UI.Colors.Dim,
+	})
+
+	card.Size = UDim2.new(0, 60, 0, 40)
+	UI.tween(card, { Size = UDim2.new(0, 360, 0, 240) }, 0.45, Enum.EasingStyle.Back)
+
+	task.delay(3.4, function()
+		UI.tween(card, { Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1 }, 0.3)
+		task.wait(0.35)
+		card:Destroy()
+	end)
+end
+
+-- ─────────────────── APERTURA ───────────────────────────────────────────────
+local function openEgg()
+	if busy or not currentEgg then return end
+	busy = true
+	openButton.Text = "ABRIENDO..."
+
+	local ok, result = pcall(function()
+		return Net.Func("OpenEgg"):InvokeServer(currentEgg.Id)
+	end)
+
+	if not ok or not result or not result.ok then
+		HUDController.Toast((result and result.message) or "No se pudo abrir", UI.Colors.Bad)
+		openButton.Text = "ABRIR"
+		busy = false
+		return
+	end
+
+	-- suspense: el servidor ya decidió, el cliente lo dramatiza
+	task.wait(1.1)
+	showReward(result.reward)
+	HUDController.Toast(("¡%s (%s)!"):format(result.reward.Name, result.reward.Rarity),
+		Config.RarityColors[result.reward.Rarity] or UI.Colors.Good)
+
+	openButton.Text = "ABRIR"
+	busy = false
+end
+
+function EggController.Open(eggId: string)
+	local egg
+	for _, e in ipairs(Config.Eggs) do
+		if e.Id == eggId then egg = e break end
+	end
+	if not egg then return end
+	currentEgg = egg
+
+	titleLabel.Text = egg.Name
+	titleLabel.TextColor3 = egg.Color
+	priceLabel.Text = ("%s ◉"):format(Format.comma(egg.Price))
+
+	local total = 0
+	for _, r in ipairs(egg.Rewards) do total += r.Weight end
+	local lines = {}
+	for _, r in ipairs(egg.Rewards) do
+		local color = Config.RarityColors[r.Rarity] or UI.Colors.Text
+		table.insert(lines, ("%s  <b>%.1f%%</b>"):format(
+			Format.colored(r.Name .. " · " .. r.Rarity, color, false), (r.Weight / total) * 100))
+	end
+	rarityLabel.Text = table.concat(lines, "\n")
+
+	panel.Visible = true
+	panel.Position = UDim2.new(0.5, 0, 1.4, 0)
+	UI.tween(panel, { Position = UDim2.new(0.5, 0, 0.5, 0) }, 0.42, Enum.EasingStyle.Back)
+end
+
+function EggController.Init()
+	gui = UI.screen("StudLegendsEggs", 15)
+
+	panel = UI.panel({
+		Name = "EggPanel", Parent = gui,
+		Size = UDim2.new(0, 420, 0, 360),
+		Position = UDim2.new(0.5, 0, 1.4, 0), AnchorPoint = Vector2.new(0.5, 0.5),
+		Visible = false, StrokeColor = UI.Colors.Accent,
+	})
+
+	titleLabel = UI.label({
+		Parent = panel, Text = "HUEVO", TextSize = 26,
+		Size = UDim2.new(1, -70, 0, 34), Position = UDim2.new(0, 16, 0, 12),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	local closeBtn = UI.button({
+		Parent = panel, Text = "✕", Size = UDim2.new(0, 36, 0, 36),
+		Position = UDim2.new(1, -48, 0, 12), BackgroundColor3 = UI.Colors.Bad,
+	})
+	closeBtn.MouseButton1Click:Connect(close)
+
+	priceLabel = UI.label({
+		Parent = panel, Text = "0 ◉", TextSize = 22,
+		Size = UDim2.new(1, -32, 0, 26), Position = UDim2.new(0, 16, 0, 48),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Gold,
+	})
+
+	UI.label({
+		Parent = panel, Text = "PROBABILIDADES", TextSize = 14, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, -32, 0, 18), Position = UDim2.new(0, 16, 0, 80),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Dim,
+	})
+	rarityLabel = UI.label({
+		Parent = panel, Text = "", TextSize = 16, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, -32, 0, 150), Position = UDim2.new(0, 16, 0, 100),
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	})
+
+	openButton = UI.button({
+		Parent = panel, Text = "ABRIR", Size = UDim2.new(1, -32, 0, 52),
+		Position = UDim2.new(0, 16, 1, -66), BackgroundColor3 = UI.Colors.Accent, TextSize = 24,
+	})
+	openButton.MouseButton1Click:Connect(function()
+		task.spawn(openEgg)
+	end)
+
+	ProximityPromptService.PromptTriggered:Connect(function(prompt)
+		local eggId = prompt:GetAttribute("EggId")
+		if eggId then
+			EggController.Open(eggId)
+		end
+	end)
+end
+
+return EggController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX39">
+      <Properties>
+        <string name="Name">HUDController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	HUDController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > HUDController   (ModuleScript)
+
+	HUD generado por código:
+	  · Barra superior con estado de ronda, temporizador y mapa
+	  · Panel de estadísticas (monedas, kills, racha)
+	  · Banner de anuncios (rondas, eventos, leyendas que entran)
+	  · KillFeed y notificaciones "toast"
+	  · Barra de evento del lobby con cuenta atrás
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Format = require(Shared.Format)
+local Net = require(Shared.Net)
+
+local UI = require(script.Parent.UI)
+
+local HUDController = {}
+
+local STATE_TEXT = {
+	INTERMISSION = "INTERMISIÓN",
+	WAITING = "ESPERANDO JUGADORES",
+	VOTING = "VOTACIÓN DE MAPA",
+	PREPARING = "PREPARANDO MAPA",
+	ROUND = "RONDA EN CURSO",
+	ENDING = "FIN DE RONDA",
+}
+local STATE_COLOR = {
+	INTERMISSION = UI.Colors.Good,
+	WAITING = UI.Colors.Dim,
+	VOTING = UI.Colors.Accent2,
+	PREPARING = UI.Colors.Warn,
+	ROUND = UI.Colors.Bad,
+	ENDING = UI.Colors.Gold,
+}
+
+local gui: ScreenGui
+local stateLabel, timerLabel, mapLabel: TextLabel
+local stateBarFill: Frame
+local coinsLabel, killsLabel, streakLabel: TextLabel
+local bannerFrame: Frame
+local bannerTitle, bannerSub: TextLabel
+local feedList: Frame
+local toastList: Frame
+local eventFrame: Frame
+local eventLabel, eventTimer: TextLabel
+
+local lastStateDuration = 1
+
+-- ─────────────────────────── CONSTRUCCIÓN ───────────────────────────────────
+local function buildRoundBar()
+	local panel = UI.panel({
+		Name = "RoundBar", Parent = gui,
+		Size = UDim2.new(0, 460, 0, 86),
+		Position = UDim2.new(0.5, 0, 0, 14),
+		AnchorPoint = Vector2.new(0.5, 0),
+		StrokeColor = UI.Colors.Accent,
+	})
+
+	stateLabel = UI.label({
+		Parent = panel, Text = "CARGANDO", TextSize = 24,
+		Size = UDim2.new(1, -24, 0, 30), Position = UDim2.new(0, 12, 0, 6),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Accent,
+	})
+
+	timerLabel = UI.label({
+		Parent = panel, Text = "00:00", TextSize = 30,
+		Size = UDim2.new(0, 120, 0, 34), Position = UDim2.new(1, -132, 0, 4),
+		TextXAlignment = Enum.TextXAlignment.Right,
+	})
+
+	mapLabel = UI.label({
+		Parent = panel, Text = Config.Tagline, TextSize = 15, Font = UI.FontBody,
+		Size = UDim2.new(1, -24, 0, 18), Position = UDim2.new(0, 12, 0, 36),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Dim, Stroke = false,
+	})
+
+	local barHolder = UI.new("Frame", {
+		Name = "BarHolder", BackgroundTransparency = 1,
+		Size = UDim2.new(1, -24, 0, 10), Position = UDim2.new(0, 12, 1, -18),
+		Parent = panel,
+	})
+	local _, fill = UI.bar(barHolder, UI.Colors.Accent)
+	stateBarFill = fill
+end
+
+local function buildStats()
+	local panel = UI.panel({
+		Name = "Stats", Parent = gui,
+		Size = UDim2.new(0, 226, 0, 110),
+		Position = UDim2.new(0, 14, 0, 14),
+		StrokeColor = UI.Colors.Gold,
+	})
+
+	UI.label({
+		Parent = panel, Text = "◉ MONEDAS", TextSize = 14, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, -20, 0, 16), Position = UDim2.new(0, 12, 0, 8),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Dim,
+	})
+	coinsLabel = UI.label({
+		Parent = panel, Text = "0", TextSize = 28,
+		Size = UDim2.new(1, -20, 0, 30), Position = UDim2.new(0, 12, 0, 22),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Gold,
+	})
+
+	killsLabel = UI.label({
+		Parent = panel, Text = "☠ 0", TextSize = 18,
+		Size = UDim2.new(0.5, -14, 0, 24), Position = UDim2.new(0, 12, 0, 58),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Bad,
+	})
+	streakLabel = UI.label({
+		Parent = panel, Text = "⚡ 0", TextSize = 18,
+		Size = UDim2.new(0.5, -14, 0, 24), Position = UDim2.new(0.5, 0, 0, 58),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Accent,
+	})
+
+	UI.label({
+		Parent = panel, Text = "E = tiendas y huevos", TextSize = 12, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, -20, 0, 16), Position = UDim2.new(0, 12, 1, -22),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Dim,
+	})
+end
+
+local function buildBanner()
+	bannerFrame = UI.new("Frame", {
+		Name = "Banner", BackgroundTransparency = 1,
+		Size = UDim2.new(0, 760, 0, 110),
+		Position = UDim2.new(0.5, 0, 0, -140),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Parent = gui,
+	})
+
+	bannerTitle = UI.label({
+		Parent = bannerFrame, Text = "", TextSize = 54, TextScaled = false,
+		Size = UDim2.new(1, 0, 0, 64), Position = UDim2.new(0, 0, 0, 0),
+		StrokeThickness = 4,
+	})
+	bannerSub = UI.label({
+		Parent = bannerFrame, Text = "", TextSize = 22, Font = UI.FontBody,
+		Size = UDim2.new(1, 0, 0, 28), Position = UDim2.new(0, 0, 0, 66),
+		TextColor3 = UI.Colors.Dim, StrokeThickness = 2,
+	})
+end
+
+local function buildFeeds()
+	feedList = UI.new("Frame", {
+		Name = "KillFeed", BackgroundTransparency = 1,
+		Size = UDim2.new(0, 330, 0, 180),
+		Position = UDim2.new(0, 14, 1, -200),
+		Parent = gui,
+	})
+	UI.new("UIListLayout", {
+		Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Bottom,
+		SortOrder = Enum.SortOrder.LayoutOrder, Parent = feedList,
+	})
+
+	toastList = UI.new("Frame", {
+		Name = "Toasts", BackgroundTransparency = 1,
+		Size = UDim2.new(0, 280, 0, 200),
+		Position = UDim2.new(1, -294, 1, -220),
+		Parent = gui,
+	})
+	UI.new("UIListLayout", {
+		Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Bottom,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		SortOrder = Enum.SortOrder.LayoutOrder, Parent = toastList,
+	})
+end
+
+local function buildEventBar()
+	eventFrame = UI.panel({
+		Name = "EventBar", Parent = gui,
+		Size = UDim2.new(0, 400, 0, 46),
+		Position = UDim2.new(0.5, 0, 0, 108),
+		AnchorPoint = Vector2.new(0.5, 0),
+		StrokeColor = UI.Colors.Accent2,
+		Visible = false,
+	})
+	eventLabel = UI.label({
+		Parent = eventFrame, Text = "", TextSize = 19,
+		Size = UDim2.new(1, -90, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Accent2,
+	})
+	eventTimer = UI.label({
+		Parent = eventFrame, Text = "", TextSize = 20,
+		Size = UDim2.new(0, 70, 1, 0), Position = UDim2.new(1, -80, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Right,
+	})
+end
+
+-- ─────────────────────────── ACTUALIZACIONES ────────────────────────────────
+function HUDController.ShowBanner(text: string, subtitle: string?, color: Color3?)
+	bannerTitle.Text = text
+	bannerTitle.TextColor3 = color or UI.Colors.Accent
+	bannerSub.Text = subtitle or ""
+
+	bannerFrame.Position = UDim2.new(0.5, 0, 0, -140)
+	UI.tween(bannerFrame, { Position = UDim2.new(0.5, 0, 0, 118) }, 0.45, Enum.EasingStyle.Back)
+	task.delay(3.2, function()
+		UI.tween(bannerFrame, { Position = UDim2.new(0.5, 0, 0, -140) }, 0.4, Enum.EasingStyle.Quad)
+	end)
+end
+
+function HUDController.Toast(text: string, color: Color3?)
+	local toast = UI.panel({
+		Parent = toastList, Size = UDim2.new(1, 0, 0, 34),
+		StrokeColor = color or UI.Colors.Good, Radius = 10,
+	})
+	UI.label({
+		Parent = toast, Text = text, TextSize = 16, Font = UI.FontBody,
+		Size = UDim2.new(1, -16, 1, 0), Position = UDim2.new(0, 8, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = color or UI.Colors.Good,
+	})
+	task.delay(2.6, function()
+		UI.tween(toast, { BackgroundTransparency = 1 }, 0.3)
+		task.wait(0.32)
+		toast:Destroy()
+	end)
+end
+
+local function addKillFeed(data)
+	local text
+	if data.Killer and data.Killer ~= "" then
+		text = ("<b>%s</b> ⚡ <b>%s</b>%s"):format(
+			Format.escapeRich(data.Killer),
+			Format.escapeRich(data.Victim),
+			(data.Streak and data.Streak >= 3) and ("  <font color=\"rgb(255,200,60)\">x%d</font>"):format(data.Streak) or ""
+		)
+	else
+		text = ("<b>%s</b> fue eliminado"):format(Format.escapeRich(data.Victim))
+	end
+
+	local row = UI.panel({ Parent = feedList, Size = UDim2.new(1, 0, 0, 30), Radius = 8, StrokeColor = UI.Colors.Bad })
+	UI.label({
+		Parent = row, Text = text, TextSize = 15, Font = UI.FontBody,
+		Size = UDim2.new(1, -14, 1, 0), Position = UDim2.new(0, 8, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+
+	if #feedList:GetChildren() > 7 then
+		for _, child in ipairs(feedList:GetChildren()) do
+			if child:IsA("Frame") then child:Destroy() break end
+		end
+	end
+	task.delay(6, function()
+		if row.Parent then
+			UI.tween(row, { BackgroundTransparency = 1 }, 0.4)
+			task.wait(0.45)
+			row:Destroy()
+		end
+	end)
+end
+
+local function onRoundState(state)
+	local text = STATE_TEXT[state.State] or state.State
+	local color = STATE_COLOR[state.State] or UI.Colors.Accent
+
+	stateLabel.Text = text
+	stateLabel.TextColor3 = color
+	timerLabel.Text = Format.clock(state.TimeLeft)
+
+	if state.State == "ROUND" then
+		mapLabel.Text = ("%s · %d vivos de %d"):format(state.MapName, state.Alive, state.Total)
+	elseif state.MapName ~= "" then
+		mapLabel.Text = state.MapName
+	else
+		mapLabel.Text = Config.Tagline
+	end
+
+	-- Barra de progreso del estado
+	local total = Config.Round[({
+		INTERMISSION = "Intermission", VOTING = "Voting",
+		PREPARING = "Preparing", ROUND = "Duration", ENDING = "PostRound",
+	})[state.State] or "Intermission"] or lastStateDuration
+	lastStateDuration = total
+
+	local alpha = math.clamp(state.TimeLeft / math.max(1, total), 0, 1)
+	TweenService:Create(stateBarFill, TweenInfo.new(1, Enum.EasingStyle.Linear), {
+		Size = UDim2.new(alpha, 0, 1, 0),
+		BackgroundColor3 = color,
+	}):Play()
+end
+
+local function onLobbyEvent(data)
+	if data.Phase == "start" then
+		eventFrame.Visible = true
+		eventLabel.Text = "✦ " .. data.Name
+		eventLabel.TextColor3 = data.Color or UI.Colors.Accent2
+		local remaining = data.Duration or 45
+		task.spawn(function()
+			while remaining > 0 and eventFrame.Visible do
+				eventTimer.Text = Format.clock(remaining)
+				task.wait(1)
+				remaining -= 1
+			end
+		end)
+	else
+		eventFrame.Visible = false
+	end
+end
+
+local function onDataSync(data)
+	coinsLabel.Text = Format.comma(data.Coins or 0)
+	killsLabel.Text = "☠ " .. Format.comma(data.Kills or 0)
+	streakLabel.Text = "⚡ " .. Format.comma(data.Streak or 0)
+end
+
+function HUDController.Init()
+	gui = UI.screen("StudLegendsHUD", 10)
+	buildRoundBar()
+	buildStats()
+	buildBanner()
+	buildFeeds()
+	buildEventBar()
+
+	Net.Event("RoundState").OnClientEvent:Connect(onRoundState)
+	Net.Event("Announce").OnClientEvent:Connect(function(data)
+		HUDController.ShowBanner(data.Text, data.Subtitle, data.Color)
+	end)
+	Net.Event("KillFeed").OnClientEvent:Connect(addKillFeed)
+	Net.Event("Toast").OnClientEvent:Connect(function(data)
+		HUDController.Toast(data.Text, data.Kind == "coin" and UI.Colors.Gold or UI.Colors.Good)
+	end)
+	Net.Event("DataSync").OnClientEvent:Connect(onDataSync)
+	Net.Event("LobbyEvent").OnClientEvent:Connect(onLobbyEvent)
+end
+
+return HUDController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX40">
+      <Properties>
+        <string name="Name">ShopController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	ShopController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > ShopController   (ModuleScript)
+
+	Abre el panel de tienda cuando el jugador activa el ProximityPrompt de un
+	puesto (atributo "ShopId"). La compra se resuelve en el servidor.
+]]
+
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Format = require(Shared.Format)
+local Net = require(Shared.Net)
+
+local UI = require(script.Parent.UI)
+local HUDController = require(script.Parent.HUDController)
+
+local ShopController = {}
+
+local gui: ScreenGui
+local panel: Frame
+local titleLabel: TextLabel
+local list: ScrollingFrame
+local owned: { [string]: boolean } = {}
+local coins = 0
+
+local function close()
+	UI.tween(panel, { Position = UDim2.new(0.5, 0, 1.4, 0) }, 0.3)
+	task.delay(0.32, function() panel.Visible = false end)
+end
+
+local function buildRow(item, accent: Color3)
+	local row = UI.panel({
+		Parent = list, Size = UDim2.new(1, -12, 0, 72), StrokeColor = accent, Radius = 12,
+	})
+
+	UI.label({
+		Parent = row, Text = item.Name, TextSize = 19,
+		Size = UDim2.new(1, -170, 0, 24), Position = UDim2.new(0, 14, 0, 10),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	UI.label({
+		Parent = row, Text = item.Desc, TextSize = 14, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, -170, 0, 20), Position = UDim2.new(0, 14, 0, 34),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Dim,
+	})
+
+	local button = UI.button({
+		Parent = row, Size = UDim2.new(0, 142, 0, 44), Position = UDim2.new(1, -154, 0.5, -22),
+		Text = ("%s ◉"):format(Format.comma(item.Price)), BackgroundColor3 = accent,
+	})
+
+	local function refresh()
+		if owned[item.Id] then
+			button.Text = "COMPRADO"
+			button.BackgroundColor3 = UI.Colors.Good
+			button.AutoButtonColor = false
+		elseif coins < item.Price then
+			button.BackgroundColor3 = Color3.fromRGB(90, 96, 120)
+		else
+			button.BackgroundColor3 = accent
+		end
+	end
+	refresh()
+
+	button.MouseButton1Click:Connect(function()
+		if owned[item.Id] then return end
+		button.Text = "..."
+		local ok, result = pcall(function()
+			return Net.Func("Purchase"):InvokeServer(item.Id)
+		end)
+		if ok and result and result.ok then
+			owned[item.Id] = true
+			coins = result.coins or coins
+			HUDController.Toast(result.message, UI.Colors.Good)
+		else
+			HUDController.Toast((result and result.message) or "Compra fallida", UI.Colors.Bad)
+		end
+		button.Text = ("%s ◉"):format(Format.comma(item.Price))
+		refresh()
+	end)
+end
+
+function ShopController.Open(shopId: string)
+	local shop
+	for _, s in ipairs(Config.Shops) do
+		if s.Id == shopId then shop = s break end
+	end
+	if not shop then return end
+
+	titleLabel.Text = ("%s  %s"):format(shop.Icon, shop.Name)
+	titleLabel.TextColor3 = shop.Color
+
+	for _, child in ipairs(list:GetChildren()) do
+		if child:IsA("Frame") then child:Destroy() end
+	end
+	for _, item in ipairs(shop.Items) do
+		buildRow(item, shop.Color)
+	end
+	list.CanvasSize = UDim2.new(0, 0, 0, #shop.Items * 80 + 12)
+
+	panel.Visible = true
+	panel.Position = UDim2.new(0.5, 0, 1.4, 0)
+	UI.tween(panel, { Position = UDim2.new(0.5, 0, 0.5, 0) }, 0.42, Enum.EasingStyle.Back)
+end
+
+function ShopController.Init()
+	gui = UI.screen("StudLegendsShop", 14)
+
+	panel = UI.panel({
+		Name = "ShopPanel", Parent = gui,
+		Size = UDim2.new(0, 560, 0, 420),
+		Position = UDim2.new(0.5, 0, 1.4, 0),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Visible = false, StrokeColor = UI.Colors.Accent2,
+	})
+
+	titleLabel = UI.label({
+		Parent = panel, Text = "TIENDA", TextSize = 26,
+		Size = UDim2.new(1, -120, 0, 36), Position = UDim2.new(0, 18, 0, 14),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+
+	local closeBtn = UI.button({
+		Parent = panel, Text = "✕", Size = UDim2.new(0, 40, 0, 40),
+		Position = UDim2.new(1, -54, 0, 14), BackgroundColor3 = UI.Colors.Bad,
+	})
+	closeBtn.MouseButton1Click:Connect(close)
+
+	list = UI.new("ScrollingFrame", {
+		Name = "Items", Parent = panel,
+		Size = UDim2.new(1, -24, 1, -74), Position = UDim2.new(0, 12, 0, 62),
+		BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 8, ScrollBarImageColor3 = UI.Colors.Accent,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+	})
+	UI.new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = list })
+
+	ProximityPromptService.PromptTriggered:Connect(function(prompt)
+		local shopId = prompt:GetAttribute("ShopId")
+		if shopId then
+			ShopController.Open(shopId)
+		end
+	end)
+
+	Net.Event("DataSync").OnClientEvent:Connect(function(data)
+		coins = data.Coins or 0
+		owned = data.Purchases or {}
+	end)
+end
+
+return ShopController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX41">
+      <Properties>
+        <string name="Name">SpawnVFXController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	SpawnVFXController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > SpawnVFXController   (ModuleScript)
+
+	ANIMACIÓN PERSONALIZADA DE APARICIÓN — RAYO + IMPACTO "PUM"
+	Se dispara desde el servidor con el RemoteEvent "SpawnVFX" cada vez que un
+	personaje aparece en el lobby o es teletransportado a un mapa.
+
+	FASE 1 · Anticipación  : el personaje se oculta y una marca Stud luminosa
+	                         se enciende en el punto exacto del suelo.
+	FASE 2 · Caída del rayo: columna neón vertical + segmentos eléctricos en
+	                         zigzag desde el cielo + trueno.
+	FASE 3 · Impacto       : onda expansiva circular, chispas Stud, destello
+	                         (PointLight temporal), camera shake solo para los
+	                         muy cercanos y materialización instantánea.
+
+	RENDIMIENTO
+	  · Filtro por distancia (Config.Performance.VFXDistance)
+	  · Pool de partes reutilizables para los segmentos del rayo
+	  · Debris para todo lo demás: cero basura en Workspace
+	  · Ningún bucle permanente: solo tweens y esperas cortas
+]]
+
+local Debris = game:GetService("Debris")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Palette = require(Shared.Palette)
+local Net = require(Shared.Net)
+local StudMaterial = require(Shared.StudMaterial)
+
+local CameraShake = require(script.Parent.CameraShake)
+
+local SpawnVFXController = {}
+
+local CFG = Config.SpawnVFX
+local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+
+local vfxFolder: Folder
+
+-- ─────────────────────────── POOL DE PARTES ─────────────────────────────────
+local pool: { BasePart } = {}
+local POOL_MAX = 48
+
+local function getPart(): BasePart
+	local part = table.remove(pool)
+	if not part then
+		part = Instance.new("Part")
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.CastShadow = false
+		part.Material = Enum.Material.Neon
+		StudMaterial.smooth(part)
+	end
+	-- Reset completo: una parte reciclada vuelve a su estado neutro.
+	part.Shape = Enum.PartType.Block
+	part.Material = Enum.Material.Neon
+	part.MaterialVariant = ""
+	StudMaterial.smooth(part)
+	part.Transparency = 0
+	part.Size = Vector3.one
+	part.Parent = vfxFolder
+	return part
+end
+
+local function recycle(part: BasePart, after: number)
+	task.delay(after, function()
+		if not part or not part:IsDescendantOf(game) then return end
+		if #pool < POOL_MAX then
+			part.Parent = nil
+			part.Transparency = 1
+			table.insert(pool, part)
+		else
+			part:Destroy()
+		end
+	end)
+end
+
+-- ─────────────────────────── UTILIDADES ─────────────────────────────────────
+local function playSound(soundId: string, position: Vector3, volume: number, pitch: number?)
+	if not soundId or soundId == "" then return end
+	local holder = Instance.new("Part")
+	holder.Anchored = true
+	holder.CanCollide = false
+	holder.CanQuery = false
+	holder.Transparency = 1
+	holder.Size = Vector3.one
+	holder.Position = position
+	holder.Parent = vfxFolder
+
+	local sound = Instance.new("Sound")
+	sound.SoundId = soundId
+	sound.Volume = volume
+	sound.PlaybackSpeed = pitch or 1
+	sound.RollOffMaxDistance = 220
+	sound.RollOffMode = Enum.RollOffMode.InverseTapered
+	sound.Parent = holder
+	pcall(function() sound:Play() end)
+
+	Debris:AddItem(holder, 5)
+end
+
+--- Busca el suelo bajo la posición para clavar la marca exactamente ahí.
+local function groundPoint(position: Vector3): Vector3
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { vfxFolder, player.Character }
+	params.IgnoreWater = true
+	local result = Workspace:Raycast(position + Vector3.new(0, 8, 0), Vector3.new(0, -40, 0), params)
+	return result and (result.Position + Vector3.new(0, 0.1, 0)) or position
+end
+
+--- Oculta / revela el personaje solo en este cliente (no toca la réplica).
+local function setCharacterAlpha(character: Model?, alpha: number)
+	if not character then return end
+	for _, d in ipairs(character:GetDescendants()) do
+		if d:IsA("BasePart") then
+			if d.Name ~= "HumanoidRootPart" then
+				d.LocalTransparencyModifier = alpha
+			end
+		elseif d:IsA("Decal") or d:IsA("Texture") then
+			pcall(function() (d :: any).LocalTransparencyModifier = alpha end)
+		end
+	end
+end
+
+local function fadeCharacterIn(character: Model?, duration: number)
+	if not character then return end
+	local steps = 8
+	for i = 1, steps do
+		setCharacterAlpha(character, 1 - i / steps)
+		task.wait(duration / steps)
+	end
+	setCharacterAlpha(character, 0)
+end
+
+-- ─────────────────────────── FASE 1 · MARCA STUD ────────────────────────────
+local function phaseMark(ground: Vector3, color: Color3)
+	-- Disco luminoso
+	local mark = getPart()
+	mark.Shape = Enum.PartType.Cylinder
+	mark.Color = color
+	mark.Size = Vector3.new(0.4, 1, 1)
+	mark.CFrame = CFrame.new(ground + Vector3.new(0, 0.15, 0)) * CFrame.Angles(0, 0, math.rad(90))
+	mark.Transparency = 0.85
+
+	TweenService:Create(mark, TweenInfo.new(CFG.AnticipationT, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Size = Vector3.new(0.4, CFG.MarkSize, CFG.MarkSize),
+		Transparency = 0.25,
+	}):Play()
+	recycle(mark, CFG.AnticipationT + CFG.StrikeT + 0.35)
+
+	-- 4 cubos Stud que se cierran sobre el punto (guiño a la estética)
+	for i = 1, 4 do
+		local ang = (i / 4) * math.pi * 2
+		local cube = getPart()
+		cube.Material = Enum.Material.Plastic
+		StudMaterial.apply(cube)
+		cube.Color = Palette.lighten(color, 0.2)
+		cube.Size = Vector3.new(1.6, 1.6, 1.6)
+		cube.CFrame = CFrame.new(ground + Vector3.new(math.cos(ang) * 9, 1.2, math.sin(ang) * 9))
+			* CFrame.Angles(0, ang, 0)
+
+		TweenService:Create(cube, TweenInfo.new(CFG.AnticipationT, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+			CFrame = CFrame.new(ground + Vector3.new(math.cos(ang) * 3.2, 0.9, math.sin(ang) * 3.2))
+				* CFrame.Angles(0, ang + math.pi, 0),
+			Transparency = 0.2,
+		}):Play()
+		recycle(cube, CFG.AnticipationT + CFG.StrikeT + 0.25)
+	end
+
+	playSound(Config.Sounds.Zap, ground, 0.35, 1.4)
+end
+
+-- ─────────────────────────── FASE 2 · CAÍDA DEL RAYO ────────────────────────
+local function phaseBolt(ground: Vector3, color: Color3)
+	local top = ground + Vector3.new(0, CFG.SkyHeight, 0)
+
+	-- Columna neón vertical
+	local column = getPart()
+	column.Shape = Enum.PartType.Cylinder
+	column.Color = Palette.lighten(color, 0.35)
+	column.Size = Vector3.new(CFG.SkyHeight, CFG.BoltWidth * 1.6, CFG.BoltWidth * 1.6)
+	column.CFrame = CFrame.new(ground:Lerp(top, 0.5)) * CFrame.Angles(0, 0, math.rad(90))
+	column.Transparency = 0.1
+	TweenService:Create(column, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Transparency = 1,
+		Size = Vector3.new(CFG.SkyHeight, 0.2, 0.2),
+	}):Play()
+	recycle(column, 0.3)
+
+	-- Segmentos eléctricos en zigzag (del cielo al suelo)
+	local previous = top
+	local segments = CFG.BoltSegments
+	for i = 1, segments do
+		local t = i / segments
+		local target = ground:Lerp(top, 1 - t)
+		if i < segments then
+			target += Vector3.new(math.random(-28, 28) / 10 * (1 - t) * 6, 0, math.random(-28, 28) / 10 * (1 - t) * 6)
+		end
+
+		local delta = target - previous
+		local length = delta.Magnitude
+		local seg = getPart()
+		seg.Color = (i % 2 == 0) and Color3.new(1, 1, 1) or color
+		seg.Size = Vector3.new(CFG.BoltWidth, CFG.BoltWidth, length)
+		seg.CFrame = CFrame.lookAt(previous:Lerp(target, 0.5), target)
+		seg.Transparency = 0
+
+		TweenService:Create(seg, TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Transparency = 1,
+			Size = Vector3.new(CFG.BoltWidth * 0.2, CFG.BoltWidth * 0.2, length),
+		}):Play()
+		recycle(seg, 0.34)
+
+		previous = target
+	end
+
+	-- Cabeza de energía que cae
+	local head = getPart()
+	head.Shape = Enum.PartType.Ball
+	head.Color = Color3.new(1, 1, 1)
+	head.Size = Vector3.new(5, 5, 5)
+	head.CFrame = CFrame.new(top)
+	local light = Instance.new("PointLight")
+	light.Color = color
+	light.Brightness = CFG.LightBrightness
+	light.Range = CFG.LightRange
+	light.Shadows = false
+	light.Parent = head
+
+	TweenService:Create(head, TweenInfo.new(CFG.StrikeT, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+		CFrame = CFrame.new(ground + Vector3.new(0, 2, 0)),
+	}):Play()
+	recycle(head, CFG.StrikeT + 0.1)
+
+	playSound(Config.Sounds.Thunder, ground, 0.85, math.random(90, 110) / 100)
+end
+
+-- ─────────────────────────── FASE 3 · IMPACTO "PUM" ─────────────────────────
+local function phaseImpact(ground: Vector3, color: Color3)
+	-- Destello puntual
+	local flashPart = getPart()
+	flashPart.Shape = Enum.PartType.Ball
+	flashPart.Color = Color3.new(1, 1, 1)
+	flashPart.Size = Vector3.new(7, 7, 7)
+	flashPart.CFrame = CFrame.new(ground + Vector3.new(0, 2.5, 0))
+
+	local flash = Instance.new("PointLight")
+	flash.Color = color
+	flash.Brightness = CFG.LightBrightness * 2
+	flash.Range = CFG.LightRange
+	flash.Shadows = false
+	flash.Parent = flashPart
+
+	TweenService:Create(flashPart, TweenInfo.new(0.3, Enum.EasingStyle.Quad), { Transparency = 1, Size = Vector3.new(1, 1, 1) }):Play()
+	TweenService:Create(flash, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { Brightness = 0, Range = 8 }):Play()
+	recycle(flashPart, 0.45)
+
+	-- Onda expansiva doble
+	for i = 1, 2 do
+		local ring = getPart()
+		ring.Shape = Enum.PartType.Cylinder
+		ring.Color = (i == 1) and color or Color3.new(1, 1, 1)
+		ring.Size = Vector3.new(0.6, 3, 3)
+		ring.CFrame = CFrame.new(ground + Vector3.new(0, 0.3 + i * 0.15, 0)) * CFrame.Angles(0, 0, math.rad(90))
+		ring.Transparency = 0.1
+
+		TweenService:Create(ring, TweenInfo.new(CFG.ImpactT + i * 0.1, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+			Size = Vector3.new(0.4, CFG.RingMaxSize * (i == 1 and 1 or 0.72), CFG.RingMaxSize * (i == 1 and 1 or 0.72)),
+			Transparency = 1,
+		}):Play()
+		recycle(ring, CFG.ImpactT + 0.3)
+	end
+
+	-- Chispas Stud (cubos reales con física, estética del juego)
+	for i = 1, Config.Performance.MaxSparkParts do
+		local spark = Instance.new("Part")
+		spark.Size = Vector3.new(0.8, 0.8, 0.8)
+		spark.Color = (i % 3 == 0) and Color3.new(1, 1, 1) or Palette.vary(color, 0.05, 0.1, 0.15)
+		spark.Material = Enum.Material.Neon
+		spark.CanCollide = false
+		spark.CanQuery = false
+		spark.CanTouch = false
+		spark.CastShadow = false
+		spark.Position = ground + Vector3.new(0, 1.5, 0)
+		spark.Parent = vfxFolder
+
+		local ang = (i / Config.Performance.MaxSparkParts) * math.pi * 2
+		spark.AssemblyLinearVelocity = Vector3.new(
+			math.cos(ang) * math.random(18, 36),
+			math.random(22, 46),
+			math.sin(ang) * math.random(18, 36)
+		)
+		spark.AssemblyAngularVelocity = Vector3.new(math.random(-12, 12), math.random(-12, 12), math.random(-12, 12))
+		TweenService:Create(spark, TweenInfo.new(0.9), { Transparency = 1 }):Play()
+		Debris:AddItem(spark, 1.1)
+	end
+
+	-- Partículas de energía
+	local emitterPart = getPart()
+	emitterPart.Transparency = 1
+	emitterPart.Size = Vector3.one
+	emitterPart.CFrame = CFrame.new(ground + Vector3.new(0, 1, 0))
+
+	local attachment = Instance.new("Attachment")
+	attachment.Parent = emitterPart
+
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	emitter.Color = ColorSequence.new(Color3.new(1, 1, 1), color)
+	emitter.LightEmission = 1
+	emitter.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1.6),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	emitter.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.1),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	emitter.Lifetime = NumberRange.new(0.35, 0.75)
+	emitter.Speed = NumberRange.new(26, 52)
+	emitter.SpreadAngle = Vector2.new(180, 180)
+	emitter.Rate = 0
+	emitter.Rotation = NumberRange.new(0, 360)
+	emitter.Drag = 4
+	emitter.Parent = attachment
+	emitter:Emit(30)
+
+	recycle(emitterPart, 1.4)
+
+	playSound(Config.Sounds.Impact, ground, 0.8, math.random(95, 108) / 100)
+
+	-- Sacudida de cámara SOLO para quien está muy cerca
+	CameraShake.ShakeAt(ground, Config.Performance.ShakeDistance, CFG.ShakeIntensity, CFG.ShakeTime)
+end
+
+-- ─────────────────────────── SECUENCIA COMPLETA ─────────────────────────────
+local function run(payload)
+	local color: Color3 = payload.Color or Palette.Cyan
+	local character: Model? = payload.Character
+	local ground = groundPoint(payload.Position)
+
+	-- FASE 1
+	setCharacterAlpha(character, 1)
+	phaseMark(ground, color)
+	task.wait(CFG.AnticipationT)
+
+	-- FASE 2
+	phaseBolt(ground, color)
+	task.wait(CFG.StrikeT)
+
+	-- FASE 3
+	phaseImpact(ground, color)
+	fadeCharacterIn(character, 0.16)
+end
+
+function SpawnVFXController.Play(payload)
+	if not payload or typeof(payload.Position) ~= "Vector3" then return end
+
+	local viewPos = camera and camera.CFrame.Position or Vector3.zero
+	local distance = (viewPos - payload.Position).Magnitude
+
+	if distance > Config.Performance.VFXDistance then
+		-- Demasiado lejos: nos saltamos el efecto pero nos aseguramos de que el
+		-- personaje NO se quede invisible.
+		setCharacterAlpha(payload.Character, 0)
+		return
+	end
+
+	task.spawn(run, payload)
+end
+
+function SpawnVFXController.Init()
+	vfxFolder = Workspace:FindFirstChild("ClientVFX") :: Folder
+	if not vfxFolder then
+		vfxFolder = Instance.new("Folder")
+		vfxFolder.Name = "ClientVFX"
+		vfxFolder.Parent = Workspace
+	end
+
+	Net.Event("SpawnVFX").OnClientEvent:Connect(function(payload)
+		SpawnVFXController.Play(payload)
+	end)
+
+	-- Seguridad: si por lo que sea el personaje quedó oculto, lo revelamos.
+	player.CharacterAdded:Connect(function(character)
+		task.delay(3, function()
+			setCharacterAlpha(character, 0)
+		end)
+	end)
+end
+
+return SpawnVFXController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX42">
+      <Properties>
+        <string name="Name">TitleController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	TitleController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > TitleController   (ModuleScript)
+
+	Mantiene los títulos 3D del Top 3 SIEMPRE del mismo tamaño en pantalla.
+
+	Por qué hace falta: un BillboardGui con Size en Offset sigue encogiéndose
+	con la distancia (el motor lo escala en perspectiva). Como el brief pide que
+	el título NO cambie de tamaño al acercar/alejar la cámara, aquí se compensa
+	multiplicando el Offset por (distancia / distancia de referencia).
+
+	Coste: un bucle con acumulador a 10 Hz sobre, como mucho, los jugadores del
+	servidor (y solo dentro de los 30 studs de MaxDistance). Nada en RenderStepped.
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+
+local TitleController = {}
+
+local TITLE_NAME = "StudLegendTitle"
+local REFERENCE_DISTANCE = 14   -- studs: a esta distancia el título mide su tamaño base
+local MIN_SCALE, MAX_SCALE = 0.55, 2.4
+
+local camera = Workspace.CurrentCamera
+local accumulator = 0
+local glowPhase = 0
+
+local function eachTitle(fn: (BillboardGui, BasePart) -> ())
+	for _, player in ipairs(Players:GetPlayers()) do
+		local character = player.Character
+		local head = character and character:FindFirstChild("Head") :: BasePart?
+		if head then
+			local bb = head:FindFirstChild(TITLE_NAME)
+			if bb and bb:IsA("BillboardGui") then
+				fn(bb, head)
+			end
+		end
+	end
+end
+
+local function update(dt: number)
+	accumulator += dt
+	local interval = Config.Performance.TitleUpdateInterval
+	if accumulator < interval then return end
+	accumulator = 0
+	glowPhase = (glowPhase + interval * 0.6) % 1
+
+	camera = Workspace.CurrentCamera
+	if not camera then return end
+	local camPos = camera.CFrame.Position
+
+	eachTitle(function(bb, head)
+		local distance = (camPos - head.Position).Magnitude
+
+		-- Fuera del alcance: el motor ya lo oculta por MaxDistance; no gastamos nada.
+		if distance > Config.Titles.MaxDistance + 4 then return end
+
+		if bb:GetAttribute("FixedScreenSize") then
+			local baseW = bb:GetAttribute("BaseWidth") or Config.Titles.BillboardSize.X.Offset
+			local baseH = bb:GetAttribute("BaseHeight") or Config.Titles.BillboardSize.Y.Offset
+			local scale = math.clamp(distance / REFERENCE_DISTANCE, MIN_SCALE, MAX_SCALE)
+			bb.Size = UDim2.fromOffset(math.floor(baseW * scale), math.floor(baseH * scale))
+		end
+
+		-- Brillo animado del Top 1
+		if bb:GetAttribute("Glow") then
+			local plate = bb:FindFirstChild("Plate")
+			local label = plate and plate:FindFirstChild("TitleText")
+			local grad = label and label:FindFirstChild("TextGradient")
+			if grad and grad:IsA("UIGradient") then
+				grad.Offset = Vector2.new(math.sin(glowPhase * math.pi * 2) * 0.35, 0)
+			end
+		end
+	end)
+end
+
+function TitleController.Init()
+	RunService.Heartbeat:Connect(update)
+end
+
+return TitleController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX43">
+      <Properties>
+        <string name="Name">UI</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	UI.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > UI   (ModuleScript)
+
+	Fábrica de interfaz: todo el HUD del juego se genera por código con estas
+	funciones (sin assets externos, sin ScreenGuis prefabricados).
+]]
+
+local TweenService = game:GetService("TweenService")
+
+local UI = {}
+
+UI.Font = Enum.Font.FredokaOne
+UI.FontBody = Enum.Font.GothamMedium
+UI.Colors = {
+	Panel   = Color3.fromRGB(18, 20, 34),
+	Panel2  = Color3.fromRGB(28, 32, 52),
+	Text    = Color3.fromRGB(240, 245, 255),
+	Dim     = Color3.fromRGB(160, 172, 200),
+	Accent  = Color3.fromRGB(0, 228, 255),
+	Accent2 = Color3.fromRGB(255, 72, 196),
+	Good    = Color3.fromRGB(120, 255, 170),
+	Warn    = Color3.fromRGB(255, 200, 60),
+	Bad     = Color3.fromRGB(255, 90, 110),
+	Gold    = Color3.fromRGB(255, 199, 44),
+}
+
+--- Crea una instancia con propiedades e hijos en una sola llamada.
+function UI.new(className: string, props: { [string]: any }?, children: { Instance }?): any
+	local inst = Instance.new(className)
+	local parent = nil
+	for key, value in pairs(props or {}) do
+		if key == "Parent" then
+			parent = value
+		else
+			(inst :: any)[key] = value
+		end
+	end
+	for _, child in ipairs(children or {}) do
+		child.Parent = inst
+	end
+	if parent then inst.Parent = parent end
+	return inst
+end
+
+function UI.corner(parent: Instance, radius: number?): UICorner
+	return UI.new("UICorner", { CornerRadius = UDim.new(0, radius or 12), Parent = parent })
+end
+
+function UI.stroke(parent: Instance, color: Color3?, thickness: number?, transparency: number?): UIStroke
+	return UI.new("UIStroke", {
+		Color = color or UI.Colors.Accent,
+		Thickness = thickness or 2,
+		Transparency = transparency or 0,
+		Parent = parent,
+	})
+end
+
+function UI.gradient(parent: Instance, a: Color3, b: Color3, rotation: number?): UIGradient
+	return UI.new("UIGradient", {
+		Color = ColorSequence.new(a, b),
+		Rotation = rotation or 90,
+		Parent = parent,
+	})
+end
+
+function UI.padding(parent: Instance, px: number): UIPadding
+	return UI.new("UIPadding", {
+		PaddingTop = UDim.new(0, px), PaddingBottom = UDim.new(0, px),
+		PaddingLeft = UDim.new(0, px), PaddingRight = UDim.new(0, px),
+		Parent = parent,
+	})
+end
+
+--- Panel con esquinas, borde y degradado.
+function UI.panel(props: { [string]: any }?): Frame
+	local p = props or {}
+	local frame = UI.new("Frame", {
+		BackgroundColor3 = p.BackgroundColor3 or UI.Colors.Panel,
+		BackgroundTransparency = p.BackgroundTransparency or 0.08,
+		BorderSizePixel = 0,
+		Size = p.Size, Position = p.Position, AnchorPoint = p.AnchorPoint,
+		Name = p.Name or "Panel", Visible = p.Visible ~= false,
+		ZIndex = p.ZIndex or 1, Parent = p.Parent,
+	})
+	UI.corner(frame, p.Radius or 14)
+	UI.stroke(frame, p.StrokeColor or UI.Colors.Accent, p.StrokeThickness or 1.5, p.StrokeTransparency or 0.35)
+	UI.gradient(frame, UI.Colors.Panel2, UI.Colors.Panel, 90)
+	return frame
+end
+
+function UI.label(props: { [string]: any }): TextLabel
+	local label = UI.new("TextLabel", {
+		BackgroundTransparency = props.BackgroundTransparency or 1,
+		Font = props.Font or UI.Font,
+		Text = props.Text or "",
+		TextColor3 = props.TextColor3 or UI.Colors.Text,
+		TextSize = props.TextSize or 18,
+		TextScaled = props.TextScaled or false,
+		TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Center,
+		TextYAlignment = props.TextYAlignment or Enum.TextYAlignment.Center,
+		TextWrapped = props.TextWrapped or false,
+		RichText = props.RichText ~= false,
+		Size = props.Size, Position = props.Position, AnchorPoint = props.AnchorPoint,
+		Name = props.Name or "Label", ZIndex = props.ZIndex or 2, Parent = props.Parent,
+		Visible = props.Visible ~= false,
+	})
+	if props.Stroke ~= false then
+		UI.stroke(label, props.StrokeColor or Color3.fromRGB(10, 12, 22), props.StrokeThickness or 2)
+	end
+	return label
+end
+
+function UI.button(props: { [string]: any }): TextButton
+	local button = UI.new("TextButton", {
+		BackgroundColor3 = props.BackgroundColor3 or UI.Colors.Accent,
+		BorderSizePixel = 0,
+		AutoButtonColor = true,
+		Font = props.Font or UI.Font,
+		Text = props.Text or "OK",
+		TextColor3 = props.TextColor3 or Color3.fromRGB(12, 14, 24),
+		TextSize = props.TextSize or 20,
+		Size = props.Size, Position = props.Position, AnchorPoint = props.AnchorPoint,
+		Name = props.Name or "Button", ZIndex = props.ZIndex or 3, Parent = props.Parent,
+	})
+	UI.corner(button, props.Radius or 10)
+	UI.stroke(button, props.StrokeColor or Color3.fromRGB(255, 255, 255), 1.5, 0.6)
+	return button
+end
+
+function UI.bar(parent: Instance, color: Color3): (Frame, Frame)
+	local back = UI.new("Frame", {
+		BackgroundColor3 = Color3.fromRGB(12, 14, 24), BackgroundTransparency = 0.25,
+		Size = UDim2.new(1, 0, 1, 0), BorderSizePixel = 0, Parent = parent,
+	})
+	UI.corner(back, 999)
+	local fill = UI.new("Frame", {
+		BackgroundColor3 = color, Size = UDim2.new(0, 0, 1, 0), BorderSizePixel = 0,
+		Name = "Fill", Parent = back,
+	})
+	UI.corner(fill, 999)
+	UI.gradient(fill, color, Color3.new(1, 1, 1), 0)
+	return back, fill
+end
+
+function UI.tween(inst: Instance, props: { [string]: any }, duration: number?, style: Enum.EasingStyle?, dir: Enum.EasingDirection?): Tween
+	local tween = TweenService:Create(
+		inst,
+		TweenInfo.new(duration or 0.25, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out),
+		props
+	)
+	tween:Play()
+	return tween
+end
+
+--- ScreenGui estándar del juego.
+function UI.screen(name: string, displayOrder: number?): ScreenGui
+	local playerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+	local existing = playerGui:FindFirstChild(name)
+	if existing then existing:Destroy() end
+	return UI.new("ScreenGui", {
+		Name = name,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		DisplayOrder = displayOrder or 10,
+		Parent = playerGui,
+	})
+end
+
+return UI
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX44">
+      <Properties>
+        <string name="Name">VoteController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	VoteController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > VoteController   (ModuleScript)
+
+	UI de votación de mapa durante el intermission.
+	La vista previa de cada mapa se dibuja por código con los colores de su
+	temática (sin imágenes externas: funciona siempre y no cuesta memoria).
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Net = require(Shared.Net)
+
+local UI = require(script.Parent.UI)
+
+local VoteController = {}
+
+local gui: ScreenGui
+local root: Frame
+local cardsHolder: Frame
+local cards: { [string]: { Frame: Frame, Votes: TextLabel, Stroke: UIStroke } } = {}
+local myVote: string? = nil
+
+-- ─────────────────── VISTA PREVIA PROCEDURAL ────────────────────────────────
+local function buildPreview(parent: Instance, info)
+	local preview = UI.new("Frame", {
+		Name = "Preview", Size = UDim2.new(1, -16, 0, 104), Position = UDim2.new(0, 8, 0, 8),
+		BackgroundColor3 = info.Primary, BorderSizePixel = 0, ClipsDescendants = true, Parent = parent,
+	})
+	UI.corner(preview, 10)
+	UI.gradient(preview, info.Primary, info.Secondary, 75)
+
+	-- "cielo" + "suelo"
+	UI.new("Frame", {
+		Size = UDim2.new(1, 0, 0.42, 0), Position = UDim2.new(0, 0, 0.58, 0),
+		BackgroundColor3 = info.Secondary, BackgroundTransparency = 0.15,
+		BorderSizePixel = 0, Parent = preview,
+	})
+
+	-- siluetas: tres bloques de alturas distintas con el color de acento
+	for i = 1, 5 do
+		local h = 0.18 + ((i * 37) % 11) / 22
+		UI.new("Frame", {
+			Size = UDim2.new(0.14, 0, h, 0),
+			Position = UDim2.new(0.06 + (i - 1) * 0.18, 0, 0.62 - h, 0),
+			BackgroundColor3 = (i % 2 == 0) and info.Accent or info.Primary,
+			BackgroundTransparency = 0.1, BorderSizePixel = 0, Parent = preview,
+		})
+	end
+
+	-- destello de acento
+	local sun = UI.new("Frame", {
+		Size = UDim2.new(0, 26, 0, 26), Position = UDim2.new(1, -44, 0, 12),
+		BackgroundColor3 = info.Accent, BorderSizePixel = 0, Parent = preview,
+	})
+	UI.corner(sun, 999)
+	return preview
+end
+
+local function buildCard(info, index: number, total: number)
+	local width = 260
+	local card = UI.panel({
+		Name = "Card_" .. info.Id, Parent = cardsHolder,
+		Size = UDim2.new(0, width, 0, 230),
+		StrokeColor = info.Accent, StrokeThickness = 2,
+	})
+	card.LayoutOrder = index
+
+	buildPreview(card, info)
+
+	UI.label({
+		Parent = card, Text = info.Name, TextSize = 20,
+		Size = UDim2.new(1, -16, 0, 26), Position = UDim2.new(0, 8, 0, 116),
+		TextColor3 = info.Accent,
+	})
+	UI.label({
+		Parent = card, Text = info.Theme, TextSize = 14, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, -16, 0, 18), Position = UDim2.new(0, 8, 0, 140),
+		TextColor3 = UI.Colors.Dim,
+	})
+	UI.label({
+		Parent = card, Text = info.Description or "", TextSize = 12, Font = UI.FontBody, Stroke = false,
+		Size = UDim2.new(1, -16, 0, 30), Position = UDim2.new(0, 8, 0, 158),
+		TextColor3 = UI.Colors.Dim, TextWrapped = true,
+	})
+
+	local votes = UI.label({
+		Parent = card, Text = "0 votos", TextSize = 16,
+		Size = UDim2.new(0, 90, 0, 24), Position = UDim2.new(0, 10, 1, -32),
+		TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = UI.Colors.Text,
+	})
+
+	local button = UI.button({
+		Parent = card, Text = "VOTAR", Size = UDim2.new(0, 110, 0, 30),
+		Position = UDim2.new(1, -120, 1, -38), BackgroundColor3 = info.Accent,
+	})
+	button.MouseButton1Click:Connect(function()
+		myVote = info.Id
+		Net.Event("CastVote"):FireServer(info.Id)
+		for id, c in pairs(cards) do
+			c.Stroke.Thickness = (id == info.Id) and 4 or 2
+			c.Stroke.Transparency = (id == info.Id) and 0 or 0.45
+		end
+	end)
+
+	local stroke = card:FindFirstChildOfClass("UIStroke") :: UIStroke
+	stroke.Transparency = 0.45
+	cards[info.Id] = { Frame = card, Votes = votes, Stroke = stroke }
+end
+
+-- ─────────────────── EVENTOS ────────────────────────────────────────────────
+local function show(options)
+	for _, child in ipairs(cardsHolder:GetChildren()) do
+		if child:IsA("Frame") then child:Destroy() end
+	end
+	table.clear(cards)
+	myVote = nil
+
+	if #options == 0 then
+		UI.tween(root, { Position = UDim2.new(0.5, 0, 1, 60) }, 0.35)
+		task.delay(0.4, function() root.Visible = false end)
+		return
+	end
+
+	for i, info in ipairs(options) do
+		buildCard(info, i, #options)
+	end
+
+	root.Visible = true
+	root.Position = UDim2.new(0.5, 0, 1, 60)
+	UI.tween(root, { Position = UDim2.new(0.5, 0, 1, -270) }, 0.45, Enum.EasingStyle.Back)
+end
+
+local function updateTally(counts)
+	for id, card in pairs(cards) do
+		local n = counts[id] or 0
+		card.Votes.Text = (n == 1) and "1 voto" or (tostring(n) .. " votos")
+	end
+end
+
+function VoteController.Init()
+	gui = UI.screen("StudLegendsVote", 11)
+
+	root = UI.new("Frame", {
+		Name = "VoteRoot", BackgroundTransparency = 1,
+		Size = UDim2.new(0, 880, 0, 270),
+		Position = UDim2.new(0.5, 0, 1, 60),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Visible = false, Parent = gui,
+	})
+
+	UI.label({
+		Parent = root, Text = "VOTA EL SIGUIENTE MAPA", TextSize = 24,
+		Size = UDim2.new(1, 0, 0, 30), Position = UDim2.new(0, 0, 0, 0),
+		TextColor3 = UI.Colors.Accent2,
+	})
+
+	cardsHolder = UI.new("Frame", {
+		Name = "Cards", BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 230), Position = UDim2.new(0, 0, 0, 34),
+		Parent = root,
+	})
+	UI.new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 14), Parent = cardsHolder,
+	})
+
+	Net.Event("VoteOptions").OnClientEvent:Connect(function(payload)
+		show(payload.Options or {})
+	end)
+	Net.Event("VoteTally").OnClientEvent:Connect(updateTally)
+	Net.Event("RoundState").OnClientEvent:Connect(function(state)
+		if state.State ~= "VOTING" and root.Visible then
+			show({})
+		end
+	end)
+end
+
+return VoteController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="RBX45">
+      <Properties>
+        <string name="Name">WorldFXController</string>
+        <ProtectedString name="Source"><![CDATA[--[[
+	WorldFXController.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > Client > WorldFXController   (ModuleScript)
+
+	Efectos de mundo que se ejecutan en el CLIENTE (coste de red = 0):
+	  · Giro de huevos, monedas y objetos de tienda (tag "StudSpin")
+	  · Trazo del Stud Blaster (RemoteEvent "CombatVFX")
+	  · Apertura de huevo vista desde fuera: temblor, destello y partículas
+	  · Ambiente de los eventos del lobby (tinte de iluminación)
+
+	Un único bucle con acumulador (30 Hz) para TODOS los objetos giratorios,
+	y solo para los que están cerca de la cámara.
+]]
+
+local CollectionService = game:GetService("CollectionService")
+local Debris = game:GetService("Debris")
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local Palette = require(Shared.Palette)
+
+local WorldFXController = {}
+
+local SPIN_TAG = "StudSpin"
+local SPIN_RANGE = 150
+
+local spinning: { BasePart } = {}
+local accumulator = 0
+local vfxFolder: Folder
+
+-- ─────────────────────── GIRO DE OBJETOS ────────────────────────────────────
+local function trackSpinner(inst: Instance)
+	if inst:IsA("BasePart") then
+		table.insert(spinning, inst)
+	end
+end
+
+local function spinUpdate(dt: number)
+	accumulator += dt
+	if accumulator < Config.Performance.SpinInterval then return end
+	local step = accumulator
+	accumulator = 0
+
+	local camera = Workspace.CurrentCamera
+	if not camera then return end
+	local camPos = camera.CFrame.Position
+
+	for i = #spinning, 1, -1 do
+		local part = spinning[i]
+		if not part.Parent then
+			table.remove(spinning, i)
+		elseif (part.Position - camPos).Magnitude < SPIN_RANGE then
+			part.CFrame = part.CFrame * CFrame.Angles(0, step * 1.6, 0)
+		end
+	end
+end
+
+-- ─────────────────────── DISPARO DEL BLASTER ────────────────────────────────
+local function combatBeam(payload)
+	local from: Vector3 = payload.From
+	local to: Vector3 = payload.To
+	if typeof(from) ~= "Vector3" or typeof(to) ~= "Vector3" then return end
+
+	local camera = Workspace.CurrentCamera
+	if camera and (camera.CFrame.Position - from).Magnitude > 320 then return end
+
+	local delta = to - from
+	local beam = Instance.new("Part")
+	beam.Anchored = true
+	beam.CanCollide = false
+	beam.CanQuery = false
+	beam.CanTouch = false
+	beam.CastShadow = false
+	beam.Material = Enum.Material.Neon
+	beam.Color = payload.Color or Palette.Cyan
+	beam.Size = Vector3.new(0.35, 0.35, delta.Magnitude)
+	beam.CFrame = CFrame.lookAt(from:Lerp(to, 0.5), to)
+	beam.Parent = vfxFolder
+
+	TweenService:Create(beam, TweenInfo.new(0.16), { Transparency = 1, Size = Vector3.new(0.05, 0.05, delta.Magnitude) }):Play()
+	Debris:AddItem(beam, 0.2)
+
+	-- chispa de impacto
+	local hit = Instance.new("Part")
+	hit.Anchored = true
+	hit.CanCollide = false
+	hit.CanQuery = false
+	hit.CastShadow = false
+	hit.Shape = Enum.PartType.Ball
+	hit.Material = Enum.Material.Neon
+	hit.Color = Color3.new(1, 1, 1)
+	hit.Size = Vector3.new(1.4, 1.4, 1.4)
+	hit.Position = to
+	hit.Parent = vfxFolder
+	TweenService:Create(hit, TweenInfo.new(0.22), { Size = Vector3.new(4, 4, 4), Transparency = 1 }):Play()
+	Debris:AddItem(hit, 0.3)
+end
+
+-- ─────────────────────── APERTURA DE HUEVO ──────────────────────────────────
+local function findEggPart(position: Vector3): BasePart?
+	local lobby = Workspace:FindFirstChild("Lobby")
+	local zone = lobby and lobby:FindFirstChild("EggZone")
+	if not zone then return nil end
+	for _, model in ipairs(zone:GetChildren()) do
+		local body = model:FindFirstChild("EggBody")
+		if body and body:IsA("BasePart") and (body.Position - position).Magnitude < 9 then
+			return body
+		end
+	end
+	return nil
+end
+
+local function eggBurst(payload)
+	local position: Vector3 = payload.Position
+	local camera = Workspace.CurrentCamera
+	if camera and (camera.CFrame.Position - position).Magnitude > 140 then return end
+
+	local egg = findEggPart(position)
+
+	-- Temblor + rotación acelerada del huevo
+	if egg then
+		local origin = egg.CFrame
+		task.spawn(function()
+			for i = 1, 16 do
+				egg.CFrame = origin
+					* CFrame.new(math.random(-6, 6) / 18, 0, math.random(-6, 6) / 18)
+					* CFrame.Angles(0, math.rad(i * 26), math.rad(math.random(-5, 5)))
+				task.wait(0.045)
+			end
+			egg.CFrame = origin
+		end)
+	end
+
+	task.delay(0.75, function()
+		-- Destello
+		local flash = Instance.new("Part")
+		flash.Anchored = true
+		flash.CanCollide = false
+		flash.CanQuery = false
+		flash.CastShadow = false
+		flash.Shape = Enum.PartType.Ball
+		flash.Material = Enum.Material.Neon
+		flash.Color = payload.RewardColor or payload.Color or Palette.White
+		flash.Size = Vector3.new(2, 2, 2)
+		flash.Position = position
+		flash.Parent = vfxFolder
+
+		local light = Instance.new("PointLight")
+		light.Color = flash.Color
+		light.Brightness = 8
+		light.Range = 34
+		light.Shadows = false
+		light.Parent = flash
+
+		TweenService:Create(flash, TweenInfo.new(0.45, Enum.EasingStyle.Quint), {
+			Size = Vector3.new(16, 16, 16), Transparency = 1,
+		}):Play()
+		TweenService:Create(light, TweenInfo.new(0.45), { Brightness = 0 }):Play()
+		Debris:AddItem(flash, 0.6)
+
+		-- Lluvia de cubos Stud del color de la recompensa
+		for i = 1, 10 do
+			local cube = Instance.new("Part")
+			cube.Size = Vector3.new(0.9, 0.9, 0.9)
+			cube.Material = Enum.Material.Neon
+			cube.Color = payload.RewardColor or Palette.White
+			cube.CanCollide = false
+			cube.CanQuery = false
+			cube.CastShadow = false
+			cube.Position = position
+			cube.Parent = vfxFolder
+			local ang = (i / 10) * math.pi * 2
+			cube.AssemblyLinearVelocity = Vector3.new(math.cos(ang) * 16, math.random(20, 34), math.sin(ang) * 16)
+			TweenService:Create(cube, TweenInfo.new(1.1), { Transparency = 1 }):Play()
+			Debris:AddItem(cube, 1.2)
+		end
+	end)
+end
+
+-- ─────────────────────── AMBIENTE DE EVENTOS ────────────────────────────────
+local eventGrade: ColorCorrectionEffect
+local discoRunning = false
+
+local AMBIENTS = {
+	gold  = { Tint = Color3.fromRGB(255, 240, 200), Saturation = 0.3 },
+	green = { Tint = Color3.fromRGB(215, 255, 230), Saturation = 0.25 },
+	storm = { Tint = Color3.fromRGB(200, 225, 255), Saturation = 0.1 },
+	disco = { Tint = Color3.fromRGB(255, 220, 255), Saturation = 0.45 },
+}
+
+local function applyAmbient(payload)
+	if payload.Phase == "end" then
+		discoRunning = false
+		TweenService:Create(eventGrade, TweenInfo.new(1.2), {
+			TintColor = Color3.fromRGB(255, 255, 255), Saturation = 0, Brightness = 0,
+		}):Play()
+		return
+	end
+
+	local preset = AMBIENTS[payload.Ambient or ""] or AMBIENTS.gold
+	TweenService:Create(eventGrade, TweenInfo.new(1.2), {
+		TintColor = preset.Tint, Saturation = preset.Saturation,
+	}):Play()
+
+	if payload.Ambient == "disco" and not discoRunning then
+		discoRunning = true
+		task.spawn(function()
+			local t = 0
+			while discoRunning do
+				t += 0.08
+				eventGrade.TintColor = Palette.rainbow(t)
+				task.wait(0.35)
+			end
+		end)
+	end
+end
+
+-- ─────────────────────── INIT ───────────────────────────────────────────────
+function WorldFXController.Init()
+	vfxFolder = Workspace:FindFirstChild("ClientVFX") :: Folder
+	if not vfxFolder then
+		vfxFolder = Instance.new("Folder")
+		vfxFolder.Name = "ClientVFX"
+		vfxFolder.Parent = Workspace
+	end
+
+	for _, inst in ipairs(CollectionService:GetTagged(SPIN_TAG)) do
+		trackSpinner(inst)
+	end
+	CollectionService:GetInstanceAddedSignal(SPIN_TAG):Connect(trackSpinner)
+
+	eventGrade = Instance.new("ColorCorrectionEffect")
+	eventGrade.Name = "EventGrade"
+	eventGrade.Saturation = 0
+	eventGrade.Parent = Lighting
+
+	RunService.Heartbeat:Connect(spinUpdate)
+	Net.Event("CombatVFX").OnClientEvent:Connect(combatBeam)
+	Net.Event("EggVFX").OnClientEvent:Connect(eggBurst)
+	Net.Event("LobbyEvent").OnClientEvent:Connect(applyAmbient)
+end
+
+return WorldFXController
+]]></ProtectedString>
+      </Properties>
+    </Item>
+
+  </Item>
+  <Item class="LocalScript" referent="RBX46">
+    <Properties>
+      <string name="Name">ClientBootstrap</string>
+      <ProtectedString name="Source"><![CDATA[--[[
+	ClientBootstrap.client.lua
+	Ubicación en Roblox: StarterPlayer > StarterPlayerScripts > ClientBootstrap   (LocalScript)
+
+	Punto de entrada ÚNICO del cliente: arranca todos los controladores.
+	Cada controlador es un ModuleScript dentro de la carpeta "Client".
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+ReplicatedStorage:WaitForChild("Shared", 60)
+ReplicatedStorage:WaitForChild("Remotes", 60)
+
+local Client = script.Parent:WaitForChild("Client")
+
+local controllers = {
+	"UI",                  -- (solo utilidades, sin Init)
+	"CameraShake",         -- (solo utilidades, sin Init)
+	"HUDController",
+	"SpawnVFXController",
+	"WorldFXController",
+	"VoteController",
+	"ShopController",
+	"EggController",
+	"ChatController",
+	"TitleController",
+	"BoardController",
+}
+
+local loaded = {}
+
+for _, name in ipairs(controllers) do
+	local ok, result = pcall(function()
+		return require(Client:WaitForChild(name, 20))
+	end)
+	if ok then
+		loaded[name] = result
+	else
+		warn(("[ClientBootstrap] no se pudo cargar %s: %s"):format(name, tostring(result)))
+	end
+end
+
+for _, name in ipairs(controllers) do
+	local module = loaded[name]
+	if type(module) == "table" and type(module.Init) == "function" then
+		local ok, err = pcall(module.Init)
+		if not ok then
+			warn(("[ClientBootstrap] error al iniciar %s: %s"):format(name, tostring(err)))
+		end
+	end
+end
+
+print("[ClientBootstrap] cliente listo")
+]]></ProtectedString>
+    </Properties>
+  </Item>
+</roblox>

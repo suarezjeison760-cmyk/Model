@@ -1,0 +1,340 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+  <Item class="LocalScript" referent="RBX47">
+    <Properties>
+      <string name="Name">LoadingScreen</string>
+      <ProtectedString name="Source"><![CDATA[--[[
+	LoadingScreen.client.lua
+	Ubicación en Roblox: ReplicatedFirst > LoadingScreen   (LocalScript)
+
+	PANTALLA DE CARGA PERSONALIZADA
+	Se ejecuta antes que nada (ReplicatedFirst), quita la pantalla por defecto
+	de Roblox y muestra una propia, animada y con progreso REAL:
+
+	  10%  → red lista (carpeta Remotes replicada)
+	  40%  → mapa del lobby replicado (suelo, tableros, tiendas, huevos)
+	  70%  → assets precargados con ContentProvider:PreloadAsync
+	  85%  → datos del jugador cargados en el servidor
+	 100%  → personaje creado en el spawn del lobby
+
+	Al terminar hace una transición suave y deja al jugador listo para moverse.
+	(El personaje NO se carga antes: el servidor usa CharacterAutoLoads = false
+	 y espera el evento "ClientReady" que manda esta pantalla.)
+]]
+
+local ContentProvider = game:GetService("ContentProvider")
+local Players = game:GetService("Players")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+ReplicatedFirst:RemoveDefaultLoadingScreen()
+
+-- ─────────────────────────── INTERFAZ ───────────────────────────────────────
+local gui = Instance.new("ScreenGui")
+gui.Name = "StudLegendsLoading"
+gui.IgnoreGuiInset = true
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 1000
+gui.Parent = playerGui
+
+local bg = Instance.new("Frame")
+bg.Size = UDim2.fromScale(1, 1)
+bg.BackgroundColor3 = Color3.fromRGB(12, 14, 26)
+bg.BorderSizePixel = 0
+bg.Parent = gui
+
+local bgGrad = Instance.new("UIGradient")
+bgGrad.Color = ColorSequence.new(Color3.fromRGB(24, 28, 58), Color3.fromRGB(8, 9, 18))
+bgGrad.Rotation = 115
+bgGrad.Parent = bg
+
+-- Cuadrícula de "studs" decorativos de fondo
+for i = 1, 26 do
+	local dot = Instance.new("Frame")
+	dot.Size = UDim2.fromOffset(18, 18)
+	dot.Position = UDim2.fromScale(math.random() , math.random())
+	dot.BackgroundColor3 = Color3.fromHSV(math.random(), 0.7, 1)
+	dot.BackgroundTransparency = 0.82
+	dot.Rotation = math.random(0, 45)
+	dot.BorderSizePixel = 0
+	dot.Parent = bg
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 5)
+	c.Parent = dot
+
+	task.spawn(function()
+		while dot.Parent do
+			TweenService:Create(dot, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+				Position = dot.Position + UDim2.fromOffset(0, -26),
+				BackgroundTransparency = 0.95,
+			}):Play()
+			task.wait(2.7)
+			dot.Position = dot.Position + UDim2.fromOffset(0, 26)
+			dot.BackgroundTransparency = 0.82
+		end
+	end)
+end
+
+local center = Instance.new("Frame")
+center.Size = UDim2.fromOffset(620, 300)
+center.Position = UDim2.fromScale(0.5, 0.5)
+center.AnchorPoint = Vector2.new(0.5, 0.5)
+center.BackgroundTransparency = 1
+center.Parent = bg
+
+-- Logo / título
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 92)
+title.BackgroundTransparency = 1
+title.Font = Enum.Font.FredokaOne
+title.Text = "STUD LEGENDS"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextSize = 76
+title.Parent = center
+
+local titleGrad = Instance.new("UIGradient")
+titleGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 230, 255)),
+	ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 72, 196)),
+})
+titleGrad.Parent = title
+
+local titleStroke = Instance.new("UIStroke")
+titleStroke.Thickness = 5
+titleStroke.Color = Color3.fromRGB(14, 16, 30)
+titleStroke.Parent = title
+
+task.spawn(function()
+	while title.Parent do
+		titleGrad.Offset = Vector2.new(-1, 0)
+		TweenService:Create(titleGrad, TweenInfo.new(2.4, Enum.EasingStyle.Linear), { Offset = Vector2.new(1, 0) }):Play()
+		task.wait(2.5)
+	end
+end)
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(1, 0, 0, 26)
+subtitle.Position = UDim2.fromOffset(0, 92)
+subtitle.BackgroundTransparency = 1
+subtitle.Font = Enum.Font.GothamMedium
+subtitle.Text = "Arena Stud · Rondas · Huevos · Leyendas"
+subtitle.TextColor3 = Color3.fromRGB(150, 165, 200)
+subtitle.TextSize = 19
+subtitle.Parent = center
+
+-- Barra de progreso
+local barBack = Instance.new("Frame")
+barBack.Size = UDim2.new(1, 0, 0, 22)
+barBack.Position = UDim2.fromOffset(0, 150)
+barBack.BackgroundColor3 = Color3.fromRGB(26, 30, 52)
+barBack.BorderSizePixel = 0
+barBack.Parent = center
+local barCorner = Instance.new("UICorner")
+barCorner.CornerRadius = UDim.new(1, 0)
+barCorner.Parent = barBack
+local barStroke = Instance.new("UIStroke")
+barStroke.Color = Color3.fromRGB(0, 228, 255)
+barStroke.Thickness = 2
+barStroke.Transparency = 0.4
+barStroke.Parent = barBack
+
+local fill = Instance.new("Frame")
+fill.Size = UDim2.new(0, 0, 1, 0)
+fill.BackgroundColor3 = Color3.fromRGB(0, 228, 255)
+fill.BorderSizePixel = 0
+fill.Parent = barBack
+local fillCorner = Instance.new("UICorner")
+fillCorner.CornerRadius = UDim.new(1, 0)
+fillCorner.Parent = fill
+local fillGrad = Instance.new("UIGradient")
+fillGrad.Color = ColorSequence.new(Color3.fromRGB(0, 228, 255), Color3.fromRGB(255, 72, 196))
+fillGrad.Parent = fill
+
+local percent = Instance.new("TextLabel")
+percent.Size = UDim2.new(0, 70, 0, 22)
+percent.Position = UDim2.new(1, -70, 0, 150)
+percent.BackgroundTransparency = 1
+percent.Font = Enum.Font.FredokaOne
+percent.Text = "0%"
+percent.TextColor3 = Color3.fromRGB(255, 255, 255)
+percent.TextSize = 18
+percent.TextXAlignment = Enum.TextXAlignment.Right
+percent.Parent = center
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, 0, 0, 24)
+status.Position = UDim2.fromOffset(0, 180)
+status.BackgroundTransparency = 1
+status.Font = Enum.Font.GothamMedium
+status.Text = "Conectando con el servidor..."
+status.TextColor3 = Color3.fromRGB(190, 205, 235)
+status.TextSize = 17
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Parent = center
+
+local tip = Instance.new("TextLabel")
+tip.Size = UDim2.new(1, 0, 0, 22)
+tip.Position = UDim2.fromOffset(0, 236)
+tip.BackgroundTransparency = 1
+tip.Font = Enum.Font.Gotham
+tip.Text = ""
+tip.TextColor3 = Color3.fromRGB(130, 145, 180)
+tip.TextSize = 15
+tip.Parent = center
+
+local TIPS = {
+	"Consejo: vota el mapa durante la intermisión, el más votado gana.",
+	"Consejo: los huevos legendarios sueltan mascotas con bonus.",
+	"Consejo: tu racha sube con cada kill sin morir. ¡Protege el Top 3!",
+	"Consejo: el Top 3 global consigue un título 3D exclusivo.",
+	"Consejo: en el evento LLUVIA DE MONEDAS se recogen studs dorados.",
+}
+task.spawn(function()
+	local i = 0
+	while tip.Parent do
+		i = (i % #TIPS) + 1
+		tip.Text = TIPS[i]
+		task.wait(3.5)
+	end
+end)
+
+-- ─────────────────────────── CÁMARA DE CARGA ────────────────────────────────
+local camera = Workspace.CurrentCamera
+local originalType = camera and camera.CameraType
+if camera then
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = CFrame.lookAt(Vector3.new(130, 120, 240), Vector3.new(0, 20, 0))
+	task.spawn(function()
+		local t = 0
+		while gui.Parent and camera do
+			t += 0.016
+			camera.CFrame = CFrame.lookAt(
+				Vector3.new(math.sin(t * 0.08) * 150, 110 + math.sin(t * 0.14) * 10, math.cos(t * 0.08) * 240),
+				Vector3.new(0, 20, 0)
+			)
+			task.wait(0.016)
+		end
+	end)
+end
+
+-- ─────────────────────────── PROGRESO REAL ──────────────────────────────────
+local progress = 0
+local function setProgress(target: number, text: string?)
+	progress = math.clamp(target, progress, 1)
+	TweenService:Create(fill, TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+		Size = UDim2.new(progress, 0, 1, 0),
+	}):Play()
+	percent.Text = ("%d%%"):format(math.floor(progress * 100))
+	if text then status.Text = text end
+end
+
+local function waitFor(predicate: () -> boolean, timeout: number): boolean
+	local t0 = os.clock()
+	while os.clock() - t0 < timeout do
+		if predicate() then return true end
+		task.wait(0.15)
+	end
+	return false
+end
+
+task.spawn(function()
+	-- 1) Red
+	setProgress(0.04, "Estableciendo conexión...")
+	local remotes = ReplicatedStorage:WaitForChild("Remotes", 40)
+	setProgress(0.10, "Red lista")
+
+	-- 2) Mundo replicado
+	setProgress(0.14, "Construyendo el lobby Stud...")
+	local lobby = Workspace:WaitForChild("Lobby", 60)
+	setProgress(0.26, "Colocando tiendas y huevos...")
+	if lobby then
+		waitFor(function()
+			return lobby:FindFirstChild("Leaderboards") ~= nil
+				and lobby:FindFirstChild("Shops") ~= nil
+				and lobby:FindFirstChild("EggZone") ~= nil
+		end, 30)
+	end
+	setProgress(0.40, "Encendiendo los leaderboards...")
+
+	-- 3) Precarga de assets
+	setProgress(0.44, "Precargando recursos...")
+	local Shared = ReplicatedStorage:WaitForChild("Shared", 20)
+	local assets: { any } = {}
+	if Shared then
+		local okCfg, Config = pcall(function() return require(Shared.Config) end)
+		if okCfg and Config then
+			for _, soundId in pairs(Config.Sounds) do
+				if typeof(soundId) == "string" and soundId ~= "" then
+					local s = Instance.new("Sound")
+					s.SoundId = soundId
+					table.insert(assets, s)
+				end
+			end
+		end
+	end
+	table.insert(assets, ("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150"):format(player.UserId))
+
+	local done = 0
+	local total = math.max(1, #assets)
+	pcall(function()
+		ContentProvider:PreloadAsync(assets, function()
+			done += 1
+			setProgress(0.44 + 0.26 * (done / total), ("Precargando recursos (%d/%d)..."):format(done, total))
+		end)
+	end)
+	setProgress(0.70, "Recursos listos")
+
+	-- 4) Datos del jugador + mundo listo en el servidor
+	setProgress(0.74, "Cargando tu progreso...")
+	local getBoot = remotes and remotes:WaitForChild("GetBootInfo", 20)
+	if getBoot then
+		waitFor(function()
+			local ok, info = pcall(function()
+				return (getBoot :: RemoteFunction):InvokeServer()
+			end)
+			return ok and info and info.WorldReady and info.DataReady
+		end, 45)
+	end
+	setProgress(0.86, "Progreso sincronizado")
+
+	-- 5) Avisamos al servidor y esperamos al personaje
+	setProgress(0.90, "Preparando tu aparición...")
+	local ready = remotes and remotes:FindFirstChild("ClientReady")
+	if ready then
+		(ready :: RemoteEvent):FireServer()
+	end
+
+	local character = player.Character
+	if not character then
+		character = player.CharacterAdded:Wait()
+	end
+	character:WaitForChild("HumanoidRootPart", 15)
+	setProgress(1, "¡Listo!")
+	task.wait(0.35)
+
+	-- Transición suave
+	if camera then
+		camera.CameraType = originalType or Enum.CameraType.Custom
+	end
+	TweenService:Create(bg, TweenInfo.new(0.7, Enum.EasingStyle.Quint), { BackgroundTransparency = 1 }):Play()
+	for _, d in ipairs(gui:GetDescendants()) do
+		if d:IsA("TextLabel") then
+			TweenService:Create(d, TweenInfo.new(0.5), { TextTransparency = 1, TextStrokeTransparency = 1 }):Play()
+		elseif d:IsA("Frame") then
+			TweenService:Create(d, TweenInfo.new(0.5), { BackgroundTransparency = 1 }):Play()
+		elseif d:IsA("UIStroke") then
+			TweenService:Create(d, TweenInfo.new(0.5), { Transparency = 1 }):Play()
+		end
+	end
+	task.wait(0.8)
+	gui:Destroy()
+end)
+]]></ProtectedString>
+    </Properties>
+  </Item>
+</roblox>
